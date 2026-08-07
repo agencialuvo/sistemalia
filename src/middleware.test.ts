@@ -14,6 +14,11 @@ let refreshedCookies: Array<{
   value: string;
   options: Record<string, unknown>;
 }> = [];
+// Defaults to "already has a tenant" so every pre-existing test (none
+// of which care about onboarding) keeps passing without touching it —
+// only the tests that explicitly want the gate to trigger set this to
+// null.
+let mockTenantId: string | null = "tenant-1";
 
 vi.mock("@supabase/ssr", () => ({
   createServerClient: (
@@ -32,6 +37,12 @@ vi.mock("@supabase/ssr", () => ({
         return { data: { user: mockUser } };
       },
     },
+    rpc: async (fn: string) => {
+      if (fn === "get_my_tenant_id") {
+        return { data: mockTenantId, error: null };
+      }
+      return { data: null, error: null };
+    },
   }),
 }));
 
@@ -43,6 +54,7 @@ beforeEach(() => {
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = "anon-key";
   mockUser = null;
   refreshedCookies = [];
+  mockTenantId = "tenant-1";
 });
 
 afterEach(() => vi.clearAllMocks());
@@ -109,5 +121,45 @@ describe("middleware — refreshed auth cookies survive redirects", () => {
     // No redirect — the normal NextResponse.next() already carries cookies.
     expect(res.headers.get("location")).toBeNull();
     expect(res.cookies.get(ROTATED.name)?.value).toBe(ROTATED.value);
+  });
+});
+
+describe("middleware — Historia 2 business onboarding gate", () => {
+  it("redirects a signed-in user with no tenant off a protected page to /onboarding", async () => {
+    mockUser = { id: "user-1" };
+    mockTenantId = null;
+
+    const res = await middleware(new NextRequest("https://app.test/dashboard"));
+
+    expect(res.status).toBe(307);
+    expect(res.headers.get("location")).toContain("/onboarding");
+  });
+
+  it("lets a signed-in user with no tenant reach /onboarding", async () => {
+    mockUser = { id: "user-1" };
+    mockTenantId = null;
+
+    const res = await middleware(new NextRequest("https://app.test/onboarding"));
+
+    expect(res.headers.get("location")).toBeNull();
+  });
+
+  it("redirects a signed-in user who already has a tenant away from /onboarding", async () => {
+    mockUser = { id: "user-1" };
+    mockTenantId = "tenant-1";
+
+    const res = await middleware(new NextRequest("https://app.test/onboarding"));
+
+    expect(res.status).toBe(307);
+    expect(res.headers.get("location")).toContain("/dashboard");
+  });
+
+  it("redirects an unauthenticated user hitting /onboarding to /login", async () => {
+    mockUser = null;
+
+    const res = await middleware(new NextRequest("https://app.test/onboarding"));
+
+    expect(res.status).toBe(307);
+    expect(res.headers.get("location")).toContain("/login");
   });
 });

@@ -25,14 +25,12 @@ export const metadata: Metadata = {
     default: "wacrm",
     template: "%s — wacrm",
   },
-  description: "Self-hostable CRM template for WhatsApp.",
+  description: "Plantilla de CRM autoalojable para WhatsApp.",
   robots: {
     index: false,
     follow: false,
   },
-  icons: {
-    icon: [{ url: "/icon" }],
-  },
+
   formatDetection: {
     email: false,
     address: false,
@@ -41,8 +39,8 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: "#020617",
-  colorScheme: "dark light",
+  themeColor: "#0328ba",
+  colorScheme: "light dark",
 };
 
 // Inline boot script — runs before React hydrates so the user's

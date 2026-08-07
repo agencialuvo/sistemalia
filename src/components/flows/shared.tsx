@@ -185,6 +185,61 @@ export function groupNodeTypesByCategory(
 }
 
 // ============================================================
+// Translated variants of NODE_META / NODE_CATEGORIES.
+//
+// NODE_META and NODE_CATEGORIES above stay as plain-English module
+// constants — they're the source of truth for icon/color/category
+// data (not translatable) and for internal-identifier generation
+// (e.g. `slugify(meta.label, type)` in flow-editor-state.tsx, which
+// must stay stable across locales). Every place that actually
+// *displays* a node type's label or blurb to the user calls
+// `useTranslations('Flows.builder')` and reads
+// `t('nodes.<type>.label')` / `t('nodes.<type>.blurb')` (or
+// `t('categories.<id>')`) directly at render time — see
+// flow-canvas.tsx, flow-builder.tsx, flow-editor-shell.tsx.
+//
+// These two helpers exist for any caller that wants the full,
+// translated NODE_META/NODE_CATEGORIES shape (icon/color/category
+// plus a translated label/blurb) in one lookup, sourced from the same
+// `Flows.builder` keys.
+// ============================================================
+
+type TFn = (key: string, values?: Record<string, string | number>) => string;
+
+export function getNodeMeta(
+  t: TFn
+): Record<
+  NodeType,
+  {
+    label: string;
+    icon: typeof Workflow;
+    color: string;
+    blurb: string;
+    category: NodeCategory;
+  }
+> {
+  return Object.fromEntries(
+    (Object.keys(NODE_META) as NodeType[]).map((type) => [
+      type,
+      {
+        ...NODE_META[type],
+        label: t(`nodes.${type}.label`),
+        blurb: t(`nodes.${type}.blurb`),
+      },
+    ])
+  ) as Record<NodeType, (typeof NODE_META)[NodeType]>;
+}
+
+export function getNodeCategories(
+  t: TFn
+): { id: NodeCategory; label: string }[] {
+  return NODE_CATEGORIES.map(({ id }) => ({
+    id,
+    label: t(`categories.${id}`),
+  }));
+}
+
+// ============================================================
 // Per-node-type color system.
 //
 // Each node type gets its own hue so the canvas reads at a glance —

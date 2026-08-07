@@ -71,10 +71,34 @@ export async function middleware(request: NextRequest) {
 
   // Protected pages - redirect to login if not authenticated
   const protectedPaths = ['/dashboard', '/inbox', '/contacts', '/pipelines', '/broadcasts', '/automations', '/settings']
-  if (!user && protectedPaths.some(path => request.nextUrl.pathname.startsWith(path))) {
+  const onboardingPath = '/onboarding'
+  if (!user && [...protectedPaths, onboardingPath].some(path => request.nextUrl.pathname.startsWith(path))) {
     const url = request.nextUrl.clone()
     url.pathname = '/login'
     return withRefreshedCookies(NextResponse.redirect(url))
+  }
+
+  // Historia 2 — business onboarding gate ("Restricción de Acceso
+  // Global"). Only checked when it can change the outcome: a signed-in
+  // user on a protected page (must have finished onboarding already)
+  // or on /onboarding itself (must NOT have finished it — no
+  // re-onboarding loops for an already-provisioned account).
+  const isOnProtectedPath = protectedPaths.some(path => request.nextUrl.pathname.startsWith(path))
+  const isOnOnboardingPath = request.nextUrl.pathname.startsWith(onboardingPath)
+  if (user && (isOnProtectedPath || isOnOnboardingPath)) {
+    const { data: tenantId } = await supabase.rpc('get_my_tenant_id')
+    if (!tenantId && isOnProtectedPath) {
+      const url = request.nextUrl.clone()
+      url.pathname = onboardingPath
+      url.search = ''
+      return withRefreshedCookies(NextResponse.redirect(url))
+    }
+    if (tenantId && isOnOnboardingPath) {
+      const url = request.nextUrl.clone()
+      url.pathname = '/dashboard'
+      url.search = ''
+      return withRefreshedCookies(NextResponse.redirect(url))
+    }
   }
 
   // API routes that need auth (not webhooks)
