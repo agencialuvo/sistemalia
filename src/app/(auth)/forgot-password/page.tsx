@@ -1,9 +1,10 @@
 "use client";
 
-import { useState } from "react";
 import Link from "next/link";
-import { useTranslations } from "next-intl";
-import { createClient } from "@/lib/supabase/client";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { useState } from "react";
+import { useForm } from "react-hook-form";
+import { KeyRound } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -14,63 +15,35 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { MessageSquare, CheckCircle, ArrowLeft } from "lucide-react";
+import { api, getApiErrorMessage } from "@/lib/api";
+import { forgotPasswordSchema, type ForgotPasswordInput } from "@/lib/validators/auth";
 
 export default function ForgotPasswordPage() {
-  const t = useTranslations("ForgotPasswordPage");
-  const [email, setEmail] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [success, setSuccess] = useState(false);
-  const supabase = createClient();
+  const [message, setMessage] = useState<string | null>(null);
+  const [serverError, setServerError] = useState<string | null>(null);
+  const {
+    register,
+    handleSubmit,
+    formState: { errors, isSubmitting },
+  } = useForm<ForgotPasswordInput>({
+    resolver: zodResolver(forgotPasswordSchema),
+    defaultValues: { email: "" },
+  });
 
-  const handleReset = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError(null);
-    setLoading(true);
-
-    const { error } = await supabase.auth.resetPasswordForEmail(email, {
-      redirectTo: `${window.location.origin}/auth/callback?next=/reset-password`,
-    });
-
-    if (error) {
-      setError(error.message);
-      setLoading(false);
-      return;
+  async function onSubmit(data: ForgotPasswordInput) {
+    setServerError(null);
+    try {
+      // Backend always returns the same generic message here regardless
+      // of whether the email exists (anti-enumeration) — safe to render
+      // directly.
+      const { data: response } = await api.post<{ message: string }>(
+        "/auth/forgot-password",
+        data,
+      );
+      setMessage(response.message);
+    } catch (error) {
+      setServerError(getApiErrorMessage(error, "No se pudo procesar la solicitud."));
     }
-
-    setSuccess(true);
-    setLoading(false);
-  };
-
-  if (success) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-background px-4">
-        <Card className="w-full max-w-md border-border bg-card">
-          <CardHeader className="items-center text-center">
-            <div className="mb-2 flex h-12 w-12 items-center justify-center rounded-xl bg-primary/10">
-              <CheckCircle className="h-6 w-6 text-primary" />
-            </div>
-            <CardTitle className="text-xl text-foreground">
-              {t("checkEmailTitle")}
-            </CardTitle>
-            <CardDescription className="text-muted-foreground">
-              {t("checkEmailDesc", { email })}
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Link href="/login">
-              <Button
-                variant="outline"
-                className="w-full border-border text-muted-foreground hover:bg-muted hover:text-foreground"
-              >
-                {t("backToSignIn")}
-              </Button>
-            </Link>
-          </CardContent>
-        </Card>
-      </div>
-    );
   }
 
   return (
@@ -78,52 +51,49 @@ export default function ForgotPasswordPage() {
       <Card className="w-full max-w-md border-border bg-card">
         <CardHeader className="items-center text-center">
           <div className="mb-2 flex h-12 w-12 items-center justify-center rounded-xl bg-primary/10">
-            <MessageSquare className="h-6 w-6 text-primary" />
+            <KeyRound className="h-6 w-6 text-primary" />
           </div>
-          <CardTitle className="text-xl text-foreground">{t("title")}</CardTitle>
+          <CardTitle className="text-xl text-foreground">Recupera tu contraseña</CardTitle>
           <CardDescription className="text-muted-foreground">
-            {t("desc")}
+            Te enviaremos instrucciones para restablecerla.
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <form onSubmit={handleReset} className="flex flex-col gap-4">
-            {error && (
-              <div className="rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-400">
-                {error}
-              </div>
-            )}
-
-            <div className="flex flex-col gap-2">
-              <Label htmlFor="email" className="text-muted-foreground">
-                {t("emailLabel")}
-              </Label>
-              <Input
-                id="email"
-                type="email"
-                placeholder={t("emailPlaceholder")}
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                required
-                className="border-border bg-muted text-foreground placeholder:text-muted-foreground focus-visible:border-primary focus-visible:ring-primary/20"
-              />
+          {message ? (
+            <div className="rounded-lg border border-border bg-muted px-4 py-3 text-center text-sm text-foreground">
+              {message}
             </div>
+          ) : (
+            <form onSubmit={handleSubmit(onSubmit)} className="flex flex-col gap-4">
+              {serverError && (
+                <div className="rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-400">
+                  {serverError}
+                </div>
+              )}
 
-            <Button
-              type="submit"
-              disabled={loading}
-              className="mt-2 h-10 w-full bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
-            >
-              {loading ? t("sending") : t("sendResetLink")}
-            </Button>
-          </form>
+              <div className="flex flex-col gap-2">
+                <Label htmlFor="email" className="text-muted-foreground">
+                  Correo electrónico
+                </Label>
+                <Input id="email" type="email" {...register("email")} />
+                {errors.email && <p className="text-sm text-red-400">{errors.email.message}</p>}
+              </div>
 
-          <Link
-            href="/login"
-            className="mt-6 flex items-center justify-center gap-2 text-sm text-muted-foreground hover:text-foreground"
-          >
-            <ArrowLeft className="h-4 w-4" />
-            {t("backToSignIn")}
-          </Link>
+              <Button
+                type="submit"
+                disabled={isSubmitting}
+                className="mt-2 h-10 w-full bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+              >
+                {isSubmitting ? "Enviando..." : "Enviar instrucciones"}
+              </Button>
+            </form>
+          )}
+
+          <p className="mt-6 text-center text-sm text-muted-foreground">
+            <Link href="/login" className="text-primary hover:text-primary/80">
+              Volver a iniciar sesión
+            </Link>
+          </p>
         </CardContent>
       </Card>
     </div>

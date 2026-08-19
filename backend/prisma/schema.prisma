@@ -1,0 +1,51 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserStatus {
+  PENDING_VERIFICATION
+  ACTIVE
+}
+
+enum AuthProvider {
+  LOCAL
+  GOOGLE
+}
+
+// Tenant / TenantUser (Centro Estético, multi-tenant membership) are defined
+// in Feature 02 (onboarding). User intentionally has no tenantId column here:
+// membership is modeled as a join table there so one user can belong to
+// multiple tenants.
+model User {
+  id            String       @id @default(uuid())
+  email         String       @unique
+  fullName      String
+  passwordHash  String? // null for provider = GOOGLE
+  status        UserStatus   @default(PENDING_VERIFICATION)
+  emailVerified Boolean      @default(false)
+  provider      AuthProvider @default(LOCAL)
+  googleId      String?      @unique
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  refreshTokens RefreshToken[]
+
+  @@index([email])
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique
+  revoked   Boolean  @default(false)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}

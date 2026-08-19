@@ -1,0 +1,44 @@
+name: sistemalia-backend
+
+# Local dev infra for backend/ only (Postgres + Redis for the NestJS auth
+# module). Deliberately separate from the root docker-compose.yml, which
+# packages the existing Next.js/Supabase app (wacrm) — different project,
+# different lifecycle, must not collide with it or with unrelated
+# containers already using 5432/5433/6379 on this host.
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: sistemalia-postgres
+    environment:
+      POSTGRES_USER: sistemalia
+      POSTGRES_PASSWORD: sistemalia
+      POSTGRES_DB: sistemalia
+    ports:
+      - '${POSTGRES_PORT:-5434}:5432'
+    volumes:
+      - sistemalia_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U sistemalia -d sistemalia']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: sistemalia-redis
+    command: redis-server --appendonly yes
+    ports:
+      - '${REDIS_PORT:-6380}:6379'
+    volumes:
+      - sistemalia_redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  sistemalia_postgres_data:
+  sistemalia_redis_data:

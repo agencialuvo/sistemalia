@@ -69,10 +69,22 @@ export async function middleware(request: NextRequest) {
     return withRefreshedCookies(NextResponse.redirect(url))
   }
 
+  // Sistema LIA / NestJS session (backend/, see .specify/features/01-auth).
+  // This is a PRESENCE check only, not signature/expiry verification —
+  // the JWT itself is verified server-side by the NestJS API on every
+  // request that actually needs the claims. Here it only decides whether
+  // the middleware lets a request through to a protected page or bounces
+  // it to /login, so a forged/expired cookie at worst reaches a page that
+  // then fails to fetch data (no NestJS-authenticated action is granted
+  // by this check alone). Coexists with the Supabase check above/below —
+  // either session is enough to pass.
+  const hasNestJsSession =
+    request.cookies.has('access_token') || request.cookies.has('refresh_token')
+
   // Protected pages - redirect to login if not authenticated
   const protectedPaths = ['/dashboard', '/inbox', '/contacts', '/pipelines', '/broadcasts', '/automations', '/settings']
   const onboardingPath = '/onboarding'
-  if (!user && [...protectedPaths, onboardingPath].some(path => request.nextUrl.pathname.startsWith(path))) {
+  if (!user && !hasNestJsSession && [...protectedPaths, onboardingPath].some(path => request.nextUrl.pathname.startsWith(path))) {
     const url = request.nextUrl.clone()
     url.pathname = '/login'
     return withRefreshedCookies(NextResponse.redirect(url))
@@ -83,6 +95,13 @@ export async function middleware(request: NextRequest) {
   // user on a protected page (must have finished onboarding already)
   // or on /onboarding itself (must NOT have finished it — no
   // re-onboarding loops for an already-provisioned account).
+  //
+  // NOTE: this gate only runs for Supabase-authenticated users (`user`).
+  // A NestJS-only session (hasNestJsSession, no Supabase `user`) is let
+  // through above but skips this gate entirely — get_my_tenant_id() is a
+  // Supabase RPC with nothing to check on the NestJS side yet. Módulo 02
+  // (Tenant Onboarding) needs to add the equivalent gate for NestJS
+  // sessions once tenants exist in Prisma.
   const isOnProtectedPath = protectedPaths.some(path => request.nextUrl.pathname.startsWith(path))
   const isOnOnboardingPath = request.nextUrl.pathname.startsWith(onboardingPath)
   if (user && (isOnProtectedPath || isOnOnboardingPath)) {

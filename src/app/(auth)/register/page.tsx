@@ -5,11 +5,10 @@ import { useRouter } from "next/navigation";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useState } from "react";
 import { useForm } from "react-hook-form";
-import { LogIn } from "lucide-react";
+import { UserRoundPlus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Separator } from "@/components/ui/separator";
 import {
   Card,
   CardContent,
@@ -18,29 +17,29 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { api, getApiErrorMessage } from "@/lib/api";
-import { loginSchema, type LoginInput } from "@/lib/validators/auth";
+import { getRecaptchaToken } from "@/lib/recaptcha";
+import { registerSchema, type RegisterInput } from "@/lib/validators/auth";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
-
-export default function LoginPage() {
+export default function RegisterPage() {
   const router = useRouter();
   const [serverError, setServerError] = useState<string | null>(null);
   const {
     register,
     handleSubmit,
     formState: { errors, isSubmitting },
-  } = useForm<LoginInput>({
-    resolver: zodResolver(loginSchema),
-    defaultValues: { email: "", password: "" },
+  } = useForm<RegisterInput>({
+    resolver: zodResolver(registerSchema),
+    defaultValues: { email: "", password: "", fullName: "", recaptchaToken: "" },
   });
 
-  async function onSubmit(data: LoginInput) {
+  async function onSubmit(data: RegisterInput) {
     setServerError(null);
     try {
-      await api.post("/auth/login", data);
-      router.push("/onboarding");
+      const recaptchaToken = await getRecaptchaToken("register");
+      await api.post("/auth/register", { ...data, recaptchaToken });
+      router.push(`/verify-otp?email=${encodeURIComponent(data.email)}`);
     } catch (error) {
-      setServerError(getApiErrorMessage(error, "No se pudo iniciar sesión."));
+      setServerError(getApiErrorMessage(error, "No se pudo completar el registro."));
     }
   }
 
@@ -49,37 +48,30 @@ export default function LoginPage() {
       <Card className="w-full max-w-md border-border bg-card">
         <CardHeader className="items-center text-center">
           <div className="mb-2 flex h-12 w-12 items-center justify-center rounded-xl bg-primary/10">
-            <LogIn className="h-6 w-6 text-primary" />
+            <UserRoundPlus className="h-6 w-6 text-primary" />
           </div>
-          <CardTitle className="text-xl text-foreground">Bienvenido de nuevo</CardTitle>
+          <CardTitle className="text-xl text-foreground">Crea tu cuenta</CardTitle>
           <CardDescription className="text-muted-foreground">
-            Inicia sesión en tu cuenta de Sistema LIA.
+            Regístrate para configurar tu Centro Estético en Sistema LIA.
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <Button
-            type="button"
-            variant="outline"
-            className="h-10 w-full"
-            onClick={() => {
-              window.location.href = `${API_URL}/auth/google`;
-            }}
-          >
-            Continuar con Google
-          </Button>
-
-          <div className="my-4 flex items-center gap-3">
-            <Separator className="flex-1" />
-            <span className="text-xs text-muted-foreground">o</span>
-            <Separator className="flex-1" />
-          </div>
-
           <form onSubmit={handleSubmit(onSubmit)} className="flex flex-col gap-4">
             {serverError && (
               <div className="rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-400">
                 {serverError}
               </div>
             )}
+
+            <div className="flex flex-col gap-2">
+              <Label htmlFor="fullName" className="text-muted-foreground">
+                Nombre completo
+              </Label>
+              <Input id="fullName" type="text" {...register("fullName")} />
+              {errors.fullName && (
+                <p className="text-sm text-red-400">{errors.fullName.message}</p>
+              )}
+            </div>
 
             <div className="flex flex-col gap-2">
               <Label htmlFor="email" className="text-muted-foreground">
@@ -90,17 +82,9 @@ export default function LoginPage() {
             </div>
 
             <div className="flex flex-col gap-2">
-              <div className="flex items-center justify-between">
-                <Label htmlFor="password" className="text-muted-foreground">
-                  Contraseña
-                </Label>
-                <Link
-                  href="/forgot-password"
-                  className="text-sm text-primary hover:text-primary/80"
-                >
-                  ¿Olvidaste tu contraseña?
-                </Link>
-              </div>
+              <Label htmlFor="password" className="text-muted-foreground">
+                Contraseña
+              </Label>
               <Input id="password" type="password" {...register("password")} />
               {errors.password && (
                 <p className="text-sm text-red-400">{errors.password.message}</p>
@@ -112,14 +96,14 @@ export default function LoginPage() {
               disabled={isSubmitting}
               className="mt-2 h-10 w-full bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
             >
-              {isSubmitting ? "Iniciando sesión..." : "Iniciar sesión"}
+              {isSubmitting ? "Creando cuenta..." : "Crear cuenta"}
             </Button>
           </form>
 
           <p className="mt-6 text-center text-sm text-muted-foreground">
-            ¿No tienes cuenta?{" "}
-            <Link href="/register" className="text-primary hover:text-primary/80">
-              Crea una cuenta
+            ¿Ya tienes cuenta?{" "}
+            <Link href="/login" className="text-primary hover:text-primary/80">
+              Inicia sesión
             </Link>
           </p>
         </CardContent>
