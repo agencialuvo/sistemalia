@@ -14,7 +14,12 @@ import { GoogleStrategy } from './strategies/google.strategy';
     PrismaModule,
     MailModule,
     PassportModule,
+    // global: every module that protects a route with the shared JwtAuthGuard
+    // (tenant, upload, sunat…) needs JwtService, and the signing secret must
+    // stay defined in exactly one place — re-registering JwtModule per feature
+    // module would invite two of them drifting apart.
     JwtModule.registerAsync({
+      global: true,
       imports: [ConfigModule],
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({

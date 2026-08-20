@@ -280,6 +280,26 @@ export class AuthService {
     return randomInt(0, 1_000_000).toString().padStart(6, '0');
   }
 
+  /**
+   * The account behind the current access token, for GET /auth/me.
+   *
+   * Returns only what the frontend session context needs — never the password
+   * hash or the provider ids. Throws if the row vanished after the token was
+   * minted (deleted account with a still-valid 15-minute token).
+   */
+  async getCurrentUser(userId: string): Promise<VerifiedUser & { createdAt: Date }> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, email: true, fullName: true, status: true, createdAt: true },
+    });
+
+    if (!user) {
+      throw new UnauthorizedException(SESSION_EXPIRED_MESSAGE);
+    }
+
+    return user;
+  }
+
   async issueTokens(
     userId: string,
     email: string,

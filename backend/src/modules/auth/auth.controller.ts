@@ -13,6 +13,8 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { AuthGuard } from '@nestjs/passport';
 import type { Request, Response } from 'express';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { AuthService, VerifiedUser } from './auth.service';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { LoginDto } from './dto/login.dto';
@@ -84,6 +86,19 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   resetPassword(@Body() dto: ResetPasswordDto) {
     return this.authService.resetPassword(dto);
+  }
+
+  /**
+   * GET /auth/me — the signed-in account.
+   *
+   * The frontend session context needs the user behind the httpOnly cookie,
+   * which it cannot read itself. Feature 01 shipped no such route, so the
+   * dashboard had no way to resolve "who am I" from a NestJS session.
+   */
+  @Get('me')
+  @UseGuards(JwtAuthGuard)
+  me(@CurrentUser('id') userId: string) {
+    return this.authService.getCurrentUser(userId);
   }
 
   @Get('google')

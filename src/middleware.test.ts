@@ -74,9 +74,9 @@ describe("middleware — refreshed auth cookies survive redirects", () => {
       new NextRequest("https://app.test/login"),
     );
 
-    // Redirect to /dashboard…
+    // Redirect to /panel…
     expect(res.status).toBe(307);
-    expect(res.headers.get("location")).toContain("/dashboard");
+    expect(res.headers.get("location")).toContain("/panel");
     // …and the rotated cookie MUST ride along, otherwise the browser keeps
     // replaying the now-consumed refresh token and the session wedges until
     // the user manually clears cookies.
@@ -90,7 +90,7 @@ describe("middleware — refreshed auth cookies survive redirects", () => {
     refreshedCookies = [{ ...ROTATED, value: "cleared" }];
 
     const res = await middleware(
-      new NextRequest("https://app.test/dashboard"),
+      new NextRequest("https://app.test/panel"),
     );
 
     expect(res.status).toBe(307);
@@ -115,7 +115,7 @@ describe("middleware — refreshed auth cookies survive redirects", () => {
     refreshedCookies = [ROTATED];
 
     const res = await middleware(
-      new NextRequest("https://app.test/dashboard"),
+      new NextRequest("https://app.test/panel"),
     );
 
     // No redirect — the normal NextResponse.next() already carries cookies.
@@ -129,7 +129,7 @@ describe("middleware — Historia 2 business onboarding gate", () => {
     mockUser = { id: "user-1" };
     mockTenantId = null;
 
-    const res = await middleware(new NextRequest("https://app.test/dashboard"));
+    const res = await middleware(new NextRequest("https://app.test/panel"));
 
     expect(res.status).toBe(307);
     expect(res.headers.get("location")).toContain("/onboarding");
@@ -151,7 +151,7 @@ describe("middleware — Historia 2 business onboarding gate", () => {
     const res = await middleware(new NextRequest("https://app.test/onboarding"));
 
     expect(res.status).toBe(307);
-    expect(res.headers.get("location")).toContain("/dashboard");
+    expect(res.headers.get("location")).toContain("/panel");
   });
 
   it("redirects an unauthenticated user hitting /onboarding to /login", async () => {

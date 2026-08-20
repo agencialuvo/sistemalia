@@ -411,7 +411,7 @@ export function FlowEditorProvider({
         method: "DELETE",
       });
       if (!res.ok) throw new Error(`Delete failed: ${res.status}`);
-      router.push("/flows");
+      router.push("/flujos");
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Delete failed";
       toast.error(msg);

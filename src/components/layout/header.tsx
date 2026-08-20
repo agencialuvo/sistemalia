@@ -19,14 +19,14 @@ import {
 import { ModeToggle } from "@/components/layout/mode-toggle";
 
 const pageTitles: Record<string, string> = {
-  "/dashboard": "dashboard",
-  "/inbox": "inbox",
-  "/notifications": "notifications",
-  "/contacts": "contacts",
+  "/panel": "dashboard",
+  "/bandeja": "inbox",
+  "/notificaciones": "notifications",
+  "/contactos": "contacts",
   "/pipelines": "pipelines",
-  "/broadcasts": "broadcasts",
-  "/automations": "automations",
-  "/settings": "settings",
+  "/difusiones": "broadcasts",
+  "/automatizaciones": "automations",
+  "/ajustes": "settings",
 };
 
 function getPageTitleKey(pathname: string): string {
@@ -113,7 +113,7 @@ export function Header({ onOpenSidebar }: HeaderProps) {
           <DropdownMenuItem
             render={
               <Link
-                href="/settings?tab=profile"
+                href="/ajustes?tab=profile"
                 className="text-popover-foreground focus:bg-accent focus:text-accent-foreground"
               />
             }
@@ -124,7 +124,7 @@ export function Header({ onOpenSidebar }: HeaderProps) {
           <DropdownMenuItem
             render={
               <Link
-                href="/settings?tab=whatsapp"
+                href="/ajustes?tab=whatsapp"
                 className="text-popover-foreground focus:bg-accent focus:text-accent-foreground"
               />
             }

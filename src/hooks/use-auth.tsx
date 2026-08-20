@@ -2,24 +2,44 @@
 
 import {
   createContext,
+  useCallback,
   useContext,
   useEffect,
-  useState,
-  useCallback,
   useMemo,
-  useRef,
+  useState,
   type ReactNode,
 } from "react";
-import { createClient } from "@/lib/supabase/client";
-import type { User } from "@supabase/supabase-js";
+import { api, setActiveTenantId } from "@/lib/api";
 import { DEFAULT_CURRENCY } from "@/lib/currency";
 import {
   canEditSettings as canEditSettingsFor,
   canManageMembers as canManageMembersFor,
   canSendMessages as canSendMessagesFor,
-  isAccountRole,
   type AccountRole,
 } from "@/lib/auth/roles";
+
+/**
+ * Session context for the dashboard, backed by the NestJS API.
+ *
+ * Previously this read the Supabase browser client directly, which made every
+ * dashboard route crash with "Your project's URL and API key are required" on a
+ * deployment that has no Supabase credentials — the normal case for Sistema
+ * LIA, whose auth lives in backend/ (Feature 01) and whose tenants live in
+ * Prisma (Feature 02).
+ *
+ * The exported shape is deliberately unchanged: 37 components consume this
+ * context, and the wacrm vocabulary ("account", "profile", account roles) is
+ * mapped onto the LIA one (tenant, TenantRole) rather than renamed, so this
+ * stayed a contained swap instead of a 37-file refactor.
+ */
+
+/** The signed-in account, as GET /auth/me returns it. */
+interface SessionUser {
+  id: string;
+  email: string;
+  /** Kept snake_case: consumers read `user.created_at` (inherited wacrm shape). */
+  created_at: string;
+}
 
 interface Profile {
   id: string;
@@ -27,12 +47,9 @@ interface Profile {
   email: string;
   avatar_url: string | null;
   role: string | null;
-  /**
-   * Opted-in beta feature keys for this account. No current feature
-   * reads this — Flows was the last user and went to soft-GA in PR
-   * #134 — but the column survives for future beta gates.
-   */
+  /** Always empty here — beta gating was a Supabase-only concept. */
   beta_features: string[];
+  /** The active tenant id. Named account_id to match existing consumers. */
   account_id: string | null;
   account_role: AccountRole | null;
 }
@@ -40,284 +57,193 @@ interface Profile {
 interface AccountSummary {
   id: string;
   name: string;
-  /** Default deal currency (ISO-4217). NOT NULL DEFAULT 'USD' in the
-   *  DB (migration 021); narrowed to DEFAULT_CURRENCY when absent. */
   default_currency: string;
 }
 
 interface AuthContextValue {
-  user: User | null;
+  user: SessionUser | null;
   profile: Profile | null;
-  /**
-   * Session-level loading. Flips to false as soon as we know whether
-   * a user is signed in, *without* waiting for the profile row. Use
-   * this for chrome (sidebar / header) that can render with just the
-   * user object.
-   */
+  /** Session-level loading: false once we know whether someone is signed in. */
   loading: boolean;
-  /**
-   * Profile-row loading. Stays true until `fetchProfile` settles
-   * (success, missing row, or error). Code that branches on
-   * `profile.beta_features` MUST gate on this — otherwise it sees the
-   * `{ loading: false, profile: null }` window during initial load
-   * and may take the "not opted in" branch incorrectly.
-   */
+  /** Tenant-level loading: false once the membership lookup settles. */
   profileLoading: boolean;
   signOut: () => Promise<void>;
-  /** Re-fetch the current user's profile row — call after a save from
-   *  the settings form so header/sidebar reflect the change without a
-   *  full page reload. */
   refreshProfile: () => Promise<void>;
-
-  // ----------------------------------------------------------
-  // Account-scoped context (added by the account-sharing series)
-  //
-  // All of these are nullable until `profileLoading` is false.
-  // After the profile resolves they're guaranteed to be set,
-  // because migration 017 made `account_id` / `account_role`
-  // NOT NULL on `profiles`.
-  // ----------------------------------------------------------
-
-  /** Account id the current user belongs to. Null while loading. */
   accountId: string | null;
-  /** Role within that account. Null while loading. */
   accountRole: AccountRole | null;
-  /** Lightweight account meta — id + name + default_currency. Null while loading. */
   account: AccountSummary | null;
-  /** Account default deal currency. Falls back to DEFAULT_CURRENCY
-   *  while loading or when no account is resolved, so callers can use
-   *  it unconditionally. */
   defaultCurrency: string;
-  /** True if `accountRole === 'owner'`. */
   isOwner: boolean;
-  /** True if `accountRole === 'admin'` (does NOT include owner — use canManageMembers for "admin or above"). */
   isAdmin: boolean;
-  /** True if `accountRole === 'agent'`. */
   isAgent: boolean;
-  /** True if `accountRole === 'viewer'`. */
   isViewer: boolean;
-  /** True if the caller can manage members (admin+). */
   canManageMembers: boolean;
-  /** True if the caller can edit account-wide settings (admin+). */
   canEditSettings: boolean;
-  /** True if the caller can send messages and edit operational data (agent+). */
   canSendMessages: boolean;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
+interface MeResponse {
+  id: string;
+  email: string;
+  fullName: string;
+  status: string;
+  createdAt: string;
+}
+
+interface TenantMembership {
+  id: string;
+  commercialName: string;
+  legalName: string;
+  specialty: string;
+  logoUrl: string | null;
+  onboardingCompletedAt: string | null;
+  role: "ADMIN_OWNER" | "ADMIN" | "MEMBER";
+}
+
 /**
- * AuthProvider — wrap this around the dashboard layout.
- * Makes ONE getSession() call for the whole tree instead of one per
- * component, avoiding internal lock contention in the Supabase client.
+ * Maps a Prisma TenantRole onto the wacrm AccountRole the UI gates on.
+ *
+ * MEMBER lands on "agent" rather than "viewer" because a MEMBER is staff who
+ * books appointments and messages patients — read-only would be the wrong
+ * default. Feature 02 defines no viewer-equivalent yet.
  */
+function toAccountRole(role: TenantMembership["role"] | undefined): AccountRole | null {
+  switch (role) {
+    case "ADMIN_OWNER":
+      return "owner";
+    case "ADMIN":
+      return "admin";
+    case "MEMBER":
+      return "agent";
+    default:
+      return null;
+  }
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<SessionUser | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [account, setAccount] = useState<AccountSummary | null>(null);
   const [loading, setLoading] = useState(true);
-  // Tracked separately from `loading`. The session settles fast (one
-  // local cookie read); the profile fetch crosses the network and
-  // settles later. Callers that gate on `profile.*` need to know which
-  // window they're in — see the type doc above.
   const [profileLoading, setProfileLoading] = useState(true);
 
-  // Tracks the user ID we've successfully initiated/completed fetching
-  // a profile for. This prevents redundant re-fetches and toggling
-  // profileLoading back to true on window focus events/token refresh.
-  const lastFetchedUserIdRef = useRef<string | null>(null);
-
-  // Shared across init, auth-state-change listener, and the exposed
-  // refreshProfile() callback. Reads the current session's user id and
-  // pulls the matching profile row along with its account summary.
-  const fetchProfile = useCallback(async (userId: string) => {
-    const supabase = createClient();
+  /**
+   * Resolves the tenant the user belongs to. Separate from the session call so
+   * the chrome (sidebar/header) can render from the user alone while this is
+   * still in flight — the same two-phase contract the Supabase version had.
+   */
+  const fetchTenant = useCallback(async (me: MeResponse) => {
     setProfileLoading(true);
-    lastFetchedUserIdRef.current = userId;
     try {
-      const { data, error } = await supabase
-        .from("profiles")
-        .select(
-          "id, full_name, email, avatar_url, role, beta_features, account_id, account_role",
-        )
-        .eq("user_id", userId)
-        .maybeSingle();
+      const { data } = await api.get<TenantMembership[]>("/tenant/me");
+      // The wizard only ever creates one tenant per account today; if that
+      // changes, this is where a tenant switcher would pick the active one.
+      const membership = data?.[0] ?? null;
 
-      if (error) {
-        console.error("[AuthProvider] fetchProfile error:", {
-          message: error.message,
-          details: error.details,
-          hint: error.hint,
-          code: error.code,
-        });
-        lastFetchedUserIdRef.current = null;
-        return;
-      }
+      // Publishes the tenant to the axios interceptor BEFORE any feature
+      // module fires its first request. Without this every /services call
+      // (and every future tenant-scoped module) answers 403.
+      setActiveTenantId(membership?.id ?? null);
 
-      if (data) {
-        // Load the account with a plain lookup by id instead of an
-        // embedded FK join. The embed (`account:accounts!inner(...)`)
-        // forces PostgREST to resolve the profiles.account_id →
-        // accounts.id relationship from its schema cache; a stale cache
-        // (common right after a migration adds the FK) makes it fail
-        // hard with PGRST200 and blanks the whole profile — the user
-        // then loses account context everywhere (issue #294). A point
-        // lookup by id needs no relationship inference, so the profile
-        // (with account_id / account_role) still resolves even if the
-        // account name lookup itself can't.
-        let accountRow: AccountSummary | null = null;
-        if (data.account_id) {
-          const { data: account, error: accountErr } = await supabase
-            .from("accounts")
-            // default_currency added in migration 021; narrowed to the
-            // USD fallback below for older schemas where it reads null.
-            .select("id, name, default_currency")
-            .eq("id", data.account_id)
-            .maybeSingle();
-          if (accountErr) {
-            console.error("[AuthProvider] fetchAccount error:", {
-              message: accountErr.message,
-              details: accountErr.details,
-              hint: accountErr.hint,
-              code: accountErr.code,
-            });
-          } else if (account) {
-            accountRow = {
-              id: account.id,
-              name: account.name,
-              default_currency: account.default_currency ?? DEFAULT_CURRENCY,
-            };
-          }
-        }
+      setProfile({
+        id: me.id,
+        full_name: me.fullName,
+        email: me.email,
+        avatar_url: membership?.logoUrl ?? null,
+        role: membership?.role ?? null,
+        beta_features: [],
+        account_id: membership?.id ?? null,
+        account_role: toAccountRole(membership?.role),
+      });
 
-        // Narrow the DB enum into our AccountRole union. The DB
-        // constraint should make this unconditional, but a future
-        // migration that broadens the enum without updating TS would
-        // otherwise crash here — fall back to null and let UI gates
-        // treat the caller as least-privileged.
-        const accountRole = isAccountRole(data.account_role)
-          ? data.account_role
-          : null;
-
-        setProfile({
-          id: data.id,
-          full_name: data.full_name,
-          email: data.email,
-          avatar_url: data.avatar_url,
-          role: data.role,
-          // `beta_features` is `NOT NULL DEFAULT ARRAY[]` in the DB, but
-          // narrow defensively in case the column hasn't been migrated yet
-          // (older deployments running 011 lazily) — `null` reads as no
-          // opt-ins, which is the safe default for any future beta gate.
-          beta_features: data.beta_features ?? [],
-          account_id: data.account_id ?? null,
-          account_role: accountRole,
-        });
-        setAccount(accountRow);
-      } else {
-        lastFetchedUserIdRef.current = null;
-      }
+      setAccount(
+        membership
+          ? {
+              id: membership.id,
+              name: membership.commercialName,
+              // No per-tenant currency column yet (Feature 02 models identity,
+              // location and hours only). Every centro is Peruvian for now.
+              default_currency: DEFAULT_CURRENCY,
+            }
+          : null,
+      );
     } catch (err) {
-      console.error("[AuthProvider] fetchProfile threw:", err);
-      lastFetchedUserIdRef.current = null;
+      // A failed tenant lookup must not blank the session — the user is still
+      // signed in, they just have no tenant context (e.g. mid-onboarding).
+      console.error("[AuthProvider] /tenant/me failed:", err);
+      setActiveTenantId(null);
+      setProfile({
+        id: me.id,
+        full_name: me.fullName,
+        email: me.email,
+        avatar_url: null,
+        role: null,
+        beta_features: [],
+        account_id: null,
+        account_role: null,
+      });
+      setAccount(null);
     } finally {
       setProfileLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    const supabase = createClient();
     let mounted = true;
 
-    const safetyTimer = setTimeout(() => {
-      if (mounted) {
-        console.warn("[AuthProvider] getSession() timed out after 3s");
-        setLoading(false);
-        setProfileLoading(false);
-      }
-    }, 3000);
-
-    const init = async () => {
+    (async () => {
       try {
-        const {
-          data: { session },
-          error,
-        } = await supabase.auth.getSession();
-
-        if (error) console.error("[AuthProvider] getSession error:", error.message);
-
+        const { data: me } = await api.get<MeResponse>("/auth/me");
         if (!mounted) return;
-        const currentUser = session?.user ?? null;
-        setUser(currentUser);
 
-        if (currentUser) {
-          // Don't block session loading on profile fetch — chrome
-          // (header, sidebar) can render from the user object alone,
-          // profile enriches async. Callers that need to branch on
-          // profile data gate on `profileLoading` instead.
-          fetchProfile(currentUser.id);
-        } else {
-          // No user → no profile to load. Flip profileLoading off so
-          // pages that gate on it don't wait forever on the logged-out
-          // path (the route guard or redirect should fire instead).
-          setProfileLoading(false);
-        }
-      } catch (err) {
-        console.error("[AuthProvider] init threw:", err);
+        setUser({ id: me.id, email: me.email, created_at: me.createdAt });
+        // Intentionally not awaited: chrome renders from the user object while
+        // the tenant resolves.
+        void fetchTenant(me);
+      } catch {
+        // 401 (no/expired session) or the API is unreachable. Either way there
+        // is no user; DashboardShellInner redirects to /login.
+        if (!mounted) return;
+        setUser(null);
+        setProfileLoading(false);
       } finally {
         if (mounted) setLoading(false);
-        clearTimeout(safetyTimer);
       }
-    };
-
-    init();
-
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (!mounted) return;
-      const currentUser = session?.user ?? null;
-      setUser(currentUser);
-
-      if (currentUser) {
-        if (currentUser.id !== lastFetchedUserIdRef.current) {
-          fetchProfile(currentUser.id);
-        }
-      } else {
-        lastFetchedUserIdRef.current = null;
-        setProfile(null);
-        setAccount(null);
-        setProfileLoading(false);
-      }
-
-      setLoading(false);
-    });
+    })();
 
     return () => {
       mounted = false;
-      clearTimeout(safetyTimer);
-      subscription.unsubscribe();
     };
-  }, [fetchProfile]);
+  }, [fetchTenant]);
 
   const signOut = useCallback(async () => {
-    const supabase = createClient();
-    await supabase.auth.signOut();
+    try {
+      await api.post("/auth/logout");
+    } catch {
+      // No logout route yet (Feature 01 ships none). Clearing local state and
+      // navigating away is the best available behaviour; the access token
+      // expires in 15 minutes regardless.
+    }
     setUser(null);
     setProfile(null);
     setAccount(null);
+    setActiveTenantId(null);
     window.location.href = "/login";
   }, []);
 
   const refreshProfile = useCallback(async () => {
-    if (!user?.id) return;
-    await fetchProfile(user.id);
-  }, [user?.id, fetchProfile]);
+    if (!user) return;
+    await fetchTenant({
+      id: user.id,
+      email: user.email,
+      fullName: profile?.full_name ?? "",
+      status: "ACTIVE",
+      createdAt: user.created_at,
+    });
+  }, [user, profile?.full_name, fetchTenant]);
 
-  // Derive the role booleans once per profile change rather than on
-  // every consumer render. Cheap regardless, but the memo also gives
-  // each derived value a stable identity for React.memo / useEffect
-  // dependencies downstream.
   const derived = useMemo(() => {
     const role = profile?.account_role ?? null;
     return {
@@ -359,10 +285,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 export function useAuth(): AuthContextValue {
   const ctx = useContext(AuthContext);
   if (!ctx) {
-    // Fallback for components rendered outside the provider (shouldn't
-    // happen in normal flow, but don't crash the page). Account state
-    // collapses to least-privileged null — every `canX` boolean is
-    // false so UI gates fail closed.
+    // Fallback for components rendered outside the provider (shouldn't happen
+    // in normal flow, but don't crash the page). Account state collapses to
+    // least-privileged null so every `canX` gate fails closed.
     return {
       user: null,
       profile: null,

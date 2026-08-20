@@ -184,7 +184,7 @@ export default function JoinPage() {
       toast.success(t('toastWelcome'));
       // Full reload (not router.push) so AuthProvider re-fetches
       // the profile with the new account_id and account_role.
-      window.location.href = '/dashboard';
+      window.location.href = '/panel';
     } catch (err) {
       console.error('[join] redeem error:', err);
       toast.error(t('toastServerUnreachable'));

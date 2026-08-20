@@ -85,6 +85,11 @@ const nextConfig: NextConfig = {
    * has no effect on a production build.
    */
   allowedDevOrigins: [
+    // Local network / WSL host. Next matches the Origin's HOSTNAME, so
+    // entries here carry no port — "localhost" covers localhost:3000.
+    "localhost",
+    "127.0.0.1",
+    "172.23.176.1",
     "*.ngrok-free.app",
     "*.ngrok.app",
     "*.ngrok.io",

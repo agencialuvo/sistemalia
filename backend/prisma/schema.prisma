@@ -17,10 +17,11 @@ enum AuthProvider {
   GOOGLE
 }
 
-// Tenant / TenantUser (Centro Estético, multi-tenant membership) are defined
-// in Feature 02 (onboarding). User intentionally has no tenantId column here:
-// membership is modeled as a join table there so one user can belong to
-// multiple tenants.
+// User intentionally has no tenantId column: multi-tenant membership is
+// modeled as the TenantUser join table (Feature 02) so one user can belong to
+// several centros estéticos. `ownedTenants` is the separate owner FK — the
+// account that ran the onboarding wizard — and is restrict-on-delete, so a
+// user backing a live tenant cannot be deleted out from under it.
 model User {
   id            String       @id @default(uuid())
   email         String       @unique
@@ -33,7 +34,9 @@ model User {
   createdAt     DateTime     @default(now())
   updatedAt     DateTime     @updatedAt
 
-  refreshTokens RefreshToken[]
+  refreshTokens     RefreshToken[]
+  ownedTenants      Tenant[]
+  tenantMemberships TenantUser[]
 
   @@index([email])
 }
@@ -48,4 +51,240 @@ model RefreshToken {
   createdAt DateTime @default(now())
 
   @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Feature 02 — Tenant Onboarding & Multi-Tenant Provisioning
+// (.specify/features/02-tenant/spec.md)
+// ---------------------------------------------------------------------------
+
+enum TenantIdentityType {
+  EMPRESA // Centro Estético / Clínica
+  MARCA_PERSONAL // Profesional Independiente
+}
+
+enum TaxIdType {
+  RUC10 // Persona Natural con Negocio
+  RUC20 // Persona Jurídica (S.A.C., E.I.R.L., S.R.L.)
+}
+
+enum SpecialtyCategory {
+  MEDICINA_ESTETICA
+  COSMETOLOGIA_SPA
+  CEJAS_PESTANAS
+  SALON_BELLEZA
+  DERMATOLOGIA
+}
+
+// Membership roles inside a Tenant. ADMIN_OWNER is the account that ran the
+// onboarding wizard (spec §2, Paso 3.4 — "Asigna al usuario el rol de
+// ADMIN_OWNER"); ADMIN / MEMBER cover the staff tiers the plan anticipates.
+enum TenantRole {
+  ADMIN_OWNER
+  ADMIN
+  MEMBER
+}
+
+// A Centro Estético. Root of the multi-tenant isolation boundary: every
+// business row added from here on hangs off a tenantId.
+model Tenant {
+  id                    String             @id @default(uuid())
+  ownerId               String
+  owner                 User               @relation(fields: [ownerId], references: [id], onDelete: Restrict)
+  identityType          TenantIdentityType
+  taxIdType             TaxIdType
+  taxId                 String             @db.VarChar(11)
+  legalName             String
+  // Dirección fiscal autocompletada por la consulta SUNAT (spec §2, Paso 1.4).
+  // Nullable: SUNAT puede estar caído y el flujo continúa en modo manual.
+  fiscalAddress         String?
+  commercialName        String
+  specialty             SpecialtyCategory
+  logoUrl               String?
+  // Marca el fin del wizard de 3 pasos. Lo consume la "Restricción de Acceso
+  // Global" (spec §1): un Tenant en borrador NO habilita el Dashboard.
+  onboardingCompletedAt DateTime?
+  createdAt             DateTime           @default(now())
+  updatedAt             DateTime           @updatedAt
+
+  branches          Branch[]
+  users             TenantUser[]
+  serviceCategories ServiceCategory[]
+  services          Service[]
+
+  @@index([taxId])
+  @@index([ownerId])
+}
+
+// Sede. El onboarding crea sólo la principal (isMain), pero el modelo admite
+// varias desde el día uno.
+model Branch {
+  id                        String   @id @default(uuid())
+  tenantId                  String
+  tenant                    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name                      String
+  address                   String
+  ubigeoCode                String   @db.VarChar(6)
+  whatsappNumber            String
+  isMain                    Boolean  @default(true)
+  // Duración estándar de citas en minutos (spec §2, Paso 2 — 30/45/60/90).
+  // Base del motor de Agenda.
+  defaultAppointmentMinutes Int      @default(60)
+  createdAt                 DateTime @default(now())
+
+  workingHours BranchWorkingHour[]
+
+  @@index([tenantId])
+}
+
+// Horario de atención por día. Se insertan los 7 días (Task 2.3); isOpen
+// distingue día laborable de día cerrado.
+model BranchWorkingHour {
+  id         String  @id @default(uuid())
+  branchId   String
+  branch     Branch  @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  dayOfWeek  Int // 0 = Domingo, 1 = Lunes, ..., 6 = Sábado
+  isOpen     Boolean @default(true)
+  openTime   String // Formato "HH:mm" (ej. "09:00")
+  closeTime  String // Formato "HH:mm" (ej. "19:00")
+  breakStart String? // Formato "HH:mm" (ej. "13:00")
+  breakEnd   String? // Formato "HH:mm" (ej. "14:00")
+
+  @@unique([branchId, dayOfWeek])
+}
+
+// Tabla de unión User <-> Tenant. Es la razón por la que User NO lleva
+// tenantId: un usuario puede pertenecer a más de un centro estético.
+model TenantUser {
+  id        String     @id @default(uuid())
+  tenantId  String
+  tenant    Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      TenantRole @default(MEMBER)
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  @@unique([tenantId, userId])
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Feature 03 — Catálogo de Servicios y Categorías
+// (.specify/features/03-services/spec.md)
+// ---------------------------------------------------------------------------
+
+// Tratamiento de una sola cita vs. paquete de sesiones. Gobierna qué campos
+// del Bloque 2 (spec §2.2) son obligatorios: sessionCount, frequencyDays y
+// packagePrice sólo aplican a SESSIONS.
+enum ServiceStructureType {
+  SINGLE // Sesión única
+  SESSIONS // Paquete de N sesiones
+}
+
+// GENERAL = el servicio hereda el horario de la sede (BranchWorkingHour).
+// CUSTOM = trae su propia matriz horaria en `customSchedule`.
+enum ServiceAvailabilityType {
+  GENERAL
+  CUSTOM
+}
+
+// Regla de cobranza (spec §2.2, Bloque 5).
+enum ServicePaymentMethod {
+  IN_PERSON // Pago en caja al momento de la atención
+  ONLINE // Pago total anticipado por pasarela
+  DEPOSIT // Anticipo parcial (ver depositAmount / depositIsPercentage)
+}
+
+// Agrupación de tratamientos ("Facial", "Corporal", "Depilación Láser").
+model ServiceCategory {
+  id          String   @id @default(uuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  // Código HEX (#RRGGBB) para pintar la categoría en el calendario.
+  color       String?  @db.VarChar(7)
+  // Baja lógica (spec §2.1): desactivar en vez de borrar para no romper el
+  // historial de citas que ya apunta a esta categoría.
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  services Service[]
+
+  // La importación por Excel resuelve categorías POR NOMBRE (spec §2.3:
+  // "Creación automática de categorías inexistentes o vinculación por
+  // nombre"). Sin esta restricción, dos cargas del mismo archivo crearían
+  // duplicados y el vínculo por nombre dejaría de ser determinista.
+  @@unique([tenantId, name])
+  @@index([tenantId])
+}
+
+// Servicio / tratamiento. Fuente única de verdad para la IA de ventas, el
+// motor de agenda y la facturación.
+model Service {
+  id         String          @id @default(uuid())
+  tenantId   String
+  tenant     Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  categoryId String
+  // NoAction, no Restrict: impide igualmente borrar una categoría con
+  // servicios vivos, pero se comprueba al final de la sentencia, así que no
+  // bloquea el borrado en cascada de un Tenant completo (que elimina ambas
+  // tablas a la vez).
+  category   ServiceCategory @relation(fields: [categoryId], references: [id], onDelete: NoAction)
+
+  // --- Bloque 1: Identificación y multimedia ---
+  name                  String
+  commercialDescription String   @db.Text
+  mainImageUrl          String?
+  // URLs de fotos antes/después servidas por UploadModule.
+  testimonioGallery     String[]
+
+  // --- Bloque 2: Estructura comercial y paquetes ---
+  structureType ServiceStructureType @default(SINGLE)
+  sessionCount  Int? // Sólo si structureType = SESSIONS
+  frequencyDays Int? // Días mínimos entre sesiones (control de agenda de la IA)
+  // Decimal(10,2), no Float: los precios se suman y comparan en facturación y
+  // el binario flotante no representa exactamente los céntimos.
+  singlePrice   Decimal              @db.Decimal(10, 2)
+  packagePrice  Decimal?             @db.Decimal(10, 2)
+
+  // --- Bloque 3: Filtro clínico y valoración ---
+  requiresEvaluation       Boolean   @default(false)
+  evaluationServiceId      String?
+  // Autorreferencia: la cita de valoración es a su vez un Service. SetNull
+  // para que borrar el servicio de valoración no arrastre a los tratamientos
+  // que lo referencian.
+  evaluationService        Service?  @relation("ServiceEvaluation", fields: [evaluationServiceId], references: [id], onDelete: SetNull)
+  evaluatedByServices      Service[] @relation("ServiceEvaluation")
+  evaluationCost           Decimal?  @db.Decimal(10, 2)
+  isEvaluationDeductible   Boolean   @default(false)
+  deductibleExpirationDays Int?
+
+  // --- Bloque 4: Tiempos y operativa ---
+  availabilityType  ServiceAvailabilityType @default(GENERAL)
+  customSchedule    Json? // Matriz horaria propia si availabilityType = CUSTOM
+  durationMinutes   Int // Duración neta del tratamiento
+  bufferMinutes     Int                     @default(0) // Limpieza / restauración de cabina
+  // Tags de alerta médica ("EMBARAZO", "MARCAPASOS"). String[] y no enum: el
+  // catálogo clínico crece por tenant y no debe exigir una migración.
+  contraindications String[]
+  prePostCare       String?                 @db.Text
+
+  // --- Bloque 5: Condiciones de pago ---
+  paymentMethod       ServicePaymentMethod @default(IN_PERSON)
+  // Monto fijo en soles, o porcentaje 0-100 si depositIsPercentage = true.
+  depositAmount       Decimal?             @db.Decimal(10, 2)
+  depositIsPercentage Boolean              @default(false)
+
+  isActive  Boolean  @default(true) // Baja lógica (spec §3, DELETE /services/:id)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // El listado siempre filtra por tenant y casi siempre por estado o
+  // categoría; Prisma no indexa las FK automáticamente en PostgreSQL.
+  @@index([tenantId, isActive])
+  @@index([categoryId])
+  @@index([evaluationServiceId])
 }

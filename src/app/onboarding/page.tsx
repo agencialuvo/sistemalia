@@ -1,154 +1,156 @@
-'use client';
+"use client";
 
-import { useCallback, useEffect, useState } from 'react';
-import { useTranslations } from 'next-intl';
-import { toast } from 'sonner';
-import { Loader2 } from 'lucide-react';
+import { useCallback, useEffect, useState } from "react";
+import { useTranslations } from "next-intl";
+import { toast } from "sonner";
+import { Loader2 } from "lucide-react";
 
-import { Step1Identity } from '@/components/onboarding/step1-identity';
-import { Step2Branch } from '@/components/onboarding/step2-branch';
-import { Step3Brand } from '@/components/onboarding/step3-brand';
-import { EMPTY_ONBOARDING_DATA, type OnboardingData } from '@/components/onboarding/types';
+import { Step1Identity } from "@/components/onboarding/step1-identity";
+import { Step2BranchHours } from "@/components/onboarding/step2-branch-hours";
+import { Step3Branding } from "@/components/onboarding/step3-branding";
+import {
+  EMPTY_ONBOARDING_DRAFT,
+  toOnboardingPayload,
+  type OnboardingDraft,
+} from "@/components/onboarding/types";
+import { api, getApiErrorMessage } from "@/lib/api";
+import { tenantOnboardingSchema } from "@/lib/validators/tenant";
 
-// Historia 2 §1 "Persistencia": if the user closes the tab mid-wizard,
-// re-opening /onboarding must resume on the same screen with the same
-// data. There's no draft table in the DB (the tenant/branch rows are
-// only written once, atomically, on "Finalizar Registro" — see
-// /api/onboarding/complete), so the in-progress draft lives in
-// localStorage, keyed per account so switching accounts never leaks
-// one business's draft into another's form.
-const DRAFT_KEY_PREFIX = 'lia-onboarding-draft:';
+// Spec §1 "Persistencia del Estado": closing the tab mid-wizard must resume on
+// the same screen with the same data. The backend keeps the authoritative draft
+// key (`onboarding_step:{userId}` in Redis, cleared by TenantService), but there
+// is no endpoint to write it yet — Task 2.3 only invalidates it. localStorage
+// covers the requirement today and the Redis draft can be layered on later
+// without changing this component's contract.
+const DRAFT_KEY = "onboarding_step";
 
 type Step = 1 | 2 | 3;
 
-function loadDraft(accountId: string): { step: Step; data: OnboardingData } | null {
+interface StoredDraft {
+  step: Step;
+  data: OnboardingDraft;
+}
+
+function loadDraft(): StoredDraft | null {
   try {
-    const raw = localStorage.getItem(DRAFT_KEY_PREFIX + accountId);
+    const raw = localStorage.getItem(DRAFT_KEY);
     if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object') return null;
-    const step = parsed.step === 2 || parsed.step === 3 ? parsed.step : 1;
-    return { step, data: { ...EMPTY_ONBOARDING_DATA, ...parsed.data } };
+    const parsed = JSON.parse(raw) as Partial<StoredDraft>;
+    if (!parsed || typeof parsed !== "object") return null;
+
+    const step: Step = parsed.step === 2 || parsed.step === 3 ? parsed.step : 1;
+    // Merge over the defaults rather than trusting the stored object wholesale:
+    // a draft written by an older build can be missing keys the current wizard
+    // reads (workingHours above all), and a half-shaped branch would crash the
+    // matrix on first render.
+    return {
+      step,
+      data: {
+        ...EMPTY_ONBOARDING_DRAFT,
+        ...parsed.data,
+        branch: { ...EMPTY_ONBOARDING_DRAFT.branch, ...parsed.data?.branch },
+      },
+    };
   } catch {
     return null;
   }
 }
 
-function saveDraft(accountId: string, step: Step, data: OnboardingData) {
+function saveDraft(step: Step, data: OnboardingDraft) {
   try {
-    localStorage.setItem(DRAFT_KEY_PREFIX + accountId, JSON.stringify({ step, data }));
+    localStorage.setItem(DRAFT_KEY, JSON.stringify({ step, data }));
   } catch {
-    // Best-effort — private browsing / storage quota. Losing draft
-    // persistence isn't fatal, the wizard still works within the tab.
+    // Best-effort — private browsing / storage quota. Losing persistence is not
+    // fatal; the wizard still works within the tab.
   }
 }
 
-function clearDraft(accountId: string) {
+function clearDraft() {
   try {
-    localStorage.removeItem(DRAFT_KEY_PREFIX + accountId);
+    localStorage.removeItem(DRAFT_KEY);
   } catch {
     // ignore
   }
 }
 
 export default function OnboardingPage() {
-  const t = useTranslations('Onboarding');
+  const t = useTranslations("Onboarding");
 
-  const [accountId, setAccountId] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [step, setStep] = useState<Step>(1);
-  const [data, setData] = useState<OnboardingData>(EMPTY_ONBOARDING_DATA);
+  // Step and data live in one object because they are always restored, saved
+  // and advanced together — splitting them meant the hydration effect had to
+  // fire three setStates for what is a single logical transition.
+  const [wizard, setWizard] = useState<{ hydrated: boolean; step: Step; data: OnboardingDraft }>({
+    hydrated: false,
+    step: 1,
+    data: EMPTY_ONBOARDING_DRAFT,
+  });
   const [finishing, setFinishing] = useState(false);
 
+  const { hydrated, step, data } = wizard;
+
+  // localStorage is read in an effect rather than in useState's initialiser so
+  // the server-rendered markup and the first client render match — /onboarding
+  // is prerendered, and reading storage during render would hydrate it with
+  // different content.
   useEffect(() => {
-    let cancelled = false;
-    fetch('/api/account')
-      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(String(res.status)))))
-      .then((body) => {
-        if (cancelled) return;
-        const id: string | undefined = body?.account?.id;
-        if (!id) throw new Error('missing account id');
-        setAccountId(id);
-        const draft = loadDraft(id);
-        if (draft) {
-          setStep(draft.step);
-          setData(draft.data);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) toast.error(t('loadError'));
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [t]);
+    const draft = loadDraft();
+    // Restoring a persisted draft is the one case the rule cannot express: it
+    // is a single setState, on mount, with an empty dep array, so it settles in
+    // one extra render pass and cannot cascade. `hydrated` gates the UI until
+    // then, so no form state is ever rendered from the pre-restore defaults.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setWizard({
+      hydrated: true,
+      step: draft?.step ?? 1,
+      data: draft?.data ?? EMPTY_ONBOARDING_DRAFT,
+    });
+  }, []);
 
-  const onChange = useCallback(
-    (patch: Partial<OnboardingData>) => {
-      setData((prev) => {
-        const next = { ...prev, ...patch };
-        if (accountId) saveDraft(accountId, step, next);
-        return next;
-      });
-    },
-    [accountId, step],
-  );
+  const onChange = useCallback((patch: Partial<OnboardingDraft>) => {
+    setWizard((prev) => {
+      const data = { ...prev.data, ...patch };
+      saveDraft(prev.step, data);
+      return { ...prev, data };
+    });
+  }, []);
 
-  const goToStep = useCallback(
-    (next: Step) => {
-      setStep(next);
-      if (accountId) saveDraft(accountId, next, data);
-    },
-    [accountId, data],
-  );
+  const goToStep = useCallback((step: Step) => {
+    setWizard((prev) => {
+      saveDraft(step, prev.data);
+      return { ...prev, step };
+    });
+    // Steps 2 and 3 are taller than the viewport on most laptops; without this
+    // the user lands mid-form after advancing.
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }, []);
 
   const onFinish = useCallback(async () => {
+    const payload = toOnboardingPayload(data);
+
+    // Re-validate the consolidated payload, not just the individual steps: the
+    // draft may have been edited across sessions, and this is the last point
+    // where a problem can be shown on the form instead of as a bare 400.
+    const parsed = tenantOnboardingSchema.safeParse(payload);
+    if (!parsed.success) {
+      toast.error(parsed.error.issues[0]?.message ?? t("invalidDraft"));
+      return;
+    }
+
     setFinishing(true);
     try {
-      const res = await fetch('/api/onboarding/complete', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          identity_type: data.identity_type,
-          tax_id_type: data.tax_id_type,
-          tax_id: data.tax_id,
-          legal_name: data.legal_name,
-          commercial_name: data.commercial_name,
-          main_category: data.main_category,
-          logo_url: data.logo_url,
-          branch_name: data.branch_name,
-          address: data.address,
-          ubigeo_code: data.district_code,
-          whatsapp_number: data.whatsapp_number,
-        }),
-      });
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        if (res.status === 409) {
-          toast.error(t('alreadyCompleted'));
-        } else {
-          toast.error(t('step3.completeFailed', { message: body.error ?? String(res.status) }));
-        }
-        setFinishing(false);
-        return;
-      }
-      if (accountId) clearDraft(accountId);
-      // Full reload (not router.push) so the dashboard shell's
-      // AuthProvider and the middleware both see the freshly-created
-      // tenant on the very next request — same reasoning as the
-      // post-login/post-signup redirects elsewhere in this app.
-      window.location.href = '/dashboard';
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Unknown error';
-      toast.error(t('step3.completeFailed', { message }));
+      await api.post("/tenant/onboarding", parsed.data);
+      clearDraft();
+      // Full reload rather than router.push: the middleware gate re-reads the
+      // membership on the next request, and a client-side navigation would
+      // bounce straight back to /onboarding from the cached route tree.
+      window.location.href = "/panel";
+    } catch (error) {
+      toast.error(getApiErrorMessage(error, t("step3.completeFailedGeneric")));
       setFinishing(false);
     }
-  }, [accountId, data, t]);
+  }, [data, t]);
 
-  if (loading) {
+  if (!hydrated) {
     return (
       <div className="flex justify-center py-16">
         <Loader2 className="size-6 animate-spin text-muted-foreground" />
@@ -162,7 +164,7 @@ export default function OnboardingPage() {
 
   if (step === 2) {
     return (
-      <Step2Branch
+      <Step2BranchHours
         data={data}
         onChange={onChange}
         onBack={() => goToStep(1)}
@@ -172,10 +174,9 @@ export default function OnboardingPage() {
   }
 
   return (
-    <Step3Brand
+    <Step3Branding
       data={data}
       onChange={onChange}
-      accountId={accountId}
       onBack={() => goToStep(2)}
       onFinish={onFinish}
       finishing={finishing}

@@ -1,10 +1,12 @@
 import { Inject, Injectable } from '@nestjs/common';
 import type Redis from 'ioredis';
 import {
+  ONBOARDING_DRAFT_TTL_SECONDS,
   OTP_RESEND_COOLDOWN_SECONDS,
   OTP_TTL_SECONDS,
   REDIS_CLIENT,
   RESET_TOKEN_TTL_SECONDS,
+  SUNAT_CACHE_TTL_SECONDS,
 } from './redis.constants';
 
 @Injectable()
@@ -88,5 +90,54 @@ export class RedisService {
   async hasOtpResendCooldown(userId: string): Promise<boolean> {
     const exists = await this.client.exists(this.otpResendCooldownKey(userId));
     return exists === 1;
+  }
+
+  // --- Feature 02: tenant onboarding -------------------------------------
+
+  private sunatKey(ruc: string): string {
+    return `sunat:ruc:${ruc}`;
+  }
+
+  /** Caches a SUNAT taxpayer lookup as raw JSON (default TTL 24h, per plan.md). */
+  async setSunatTaxpayer(
+    ruc: string,
+    payload: string,
+    ttlSeconds = SUNAT_CACHE_TTL_SECONDS,
+  ): Promise<void> {
+    await this.client.set(this.sunatKey(ruc), payload, 'EX', ttlSeconds);
+  }
+
+  /** Returns the cached SUNAT payload for a RUC, or null if never cached / expired. */
+  async getSunatTaxpayer(ruc: string): Promise<string | null> {
+    return this.client.get(this.sunatKey(ruc));
+  }
+
+  private onboardingDraftKey(userId: string): string {
+    return `onboarding_step:${userId}`;
+  }
+
+  /**
+   * Stores the in-progress onboarding wizard state so closing the tab mid-way
+   * resumes on the same step (spec §1, "Persistencia del Estado").
+   */
+  async setOnboardingDraft(
+    userId: string,
+    payload: string,
+    ttlSeconds = ONBOARDING_DRAFT_TTL_SECONDS,
+  ): Promise<void> {
+    await this.client.set(this.onboardingDraftKey(userId), payload, 'EX', ttlSeconds);
+  }
+
+  async getOnboardingDraft(userId: string): Promise<string | null> {
+    return this.client.get(this.onboardingDraftKey(userId));
+  }
+
+  /**
+   * Drops the wizard draft once the tenant exists. Called inside the onboarding
+   * flow so a finished account can never be bounced back into a half-filled
+   * wizard by a stale Redis key.
+   */
+  async deleteOnboardingDraft(userId: string): Promise<void> {
+    await this.client.del(this.onboardingDraftKey(userId));
   }
 }

@@ -18,7 +18,7 @@ import {
 } from "@/components/ui/card";
 import { api, getApiErrorMessage } from "@/lib/api";
 import { getRecaptchaToken } from "@/lib/recaptcha";
-import { registerSchema, type RegisterInput } from "@/lib/validators/auth";
+import { registerFormSchema, type RegisterFormInput } from "@/lib/validators/auth";
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -27,12 +27,12 @@ export default function RegisterPage() {
     register,
     handleSubmit,
     formState: { errors, isSubmitting },
-  } = useForm<RegisterInput>({
-    resolver: zodResolver(registerSchema),
-    defaultValues: { email: "", password: "", fullName: "", recaptchaToken: "" },
+  } = useForm<RegisterFormInput>({
+    resolver: zodResolver(registerFormSchema),
+    defaultValues: { email: "", password: "", fullName: "" },
   });
 
-  async function onSubmit(data: RegisterInput) {
+  async function onSubmit(data: RegisterFormInput) {
     setServerError(null);
     try {
       const recaptchaToken = await getRecaptchaToken("register");

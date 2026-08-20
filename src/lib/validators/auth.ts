@@ -16,6 +16,7 @@ const notDisposableEmailSchema = z
     return !!domain && !DISPOSABLE_EMAIL_DOMAINS.has(domain);
   }, "Este dominio de correo no está permitido (correos temporales/desechables).");
 
+/** Full body of POST /auth/register, matching the backend RegisterDto. */
 export const registerSchema = z.object({
   email: notDisposableEmailSchema,
   password: passwordSchema,
@@ -23,6 +24,19 @@ export const registerSchema = z.object({
   recaptchaToken: z.string().min(1, "Verificación anti-bot requerida."),
 });
 export type RegisterInput = z.infer<typeof registerSchema>;
+
+/**
+ * What the register FORM validates — only the fields the user actually types.
+ *
+ * `recaptchaToken` is deliberately excluded: it is produced asynchronously at
+ * submit time, so there is no input bound to it and its value is "" while the
+ * form is being filled. Validating it here made react-hook-form fail on an
+ * invisible field, which silently aborted handleSubmit — the button did
+ * nothing, with no error shown and no request sent. Keep form-only fields and
+ * request-only fields apart.
+ */
+export const registerFormSchema = registerSchema.omit({ recaptchaToken: true });
+export type RegisterFormInput = z.infer<typeof registerFormSchema>;
 
 export const loginSchema = z.object({
   email: z.string().email("El correo electrónico no es válido."),

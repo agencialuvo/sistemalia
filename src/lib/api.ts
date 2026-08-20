@@ -12,6 +12,37 @@ interface RetriableRequestConfig extends InternalAxiosRequestConfig {
   _retry?: boolean;
 }
 
+/**
+ * Active centro estético, sent as `x-tenant-id` on every request.
+ *
+ * The backend's TenantContextInterceptor resolves this header against the
+ * caller's TenantUser rows and only then lets a handler read or write anything
+ * scoped to a tenant — routes using @TenantId() answer 403 without it. It is
+ * NOT a trust boundary: the server verifies membership, so the worst a tampered
+ * value can do is get a 403.
+ *
+ * Kept in a module-level variable rather than passed per call because every
+ * feature module would otherwise have to remember to attach it, and forgetting
+ * produces a 403 that looks like a permissions bug rather than a missing
+ * header. AuthProvider sets it as soon as the membership lookup settles.
+ */
+let activeTenantId: string | null = null;
+
+export function setActiveTenantId(tenantId: string | null): void {
+  activeTenantId = tenantId;
+}
+
+export function getActiveTenantId(): string | null {
+  return activeTenantId;
+}
+
+api.interceptors.request.use((config) => {
+  if (activeTenantId) {
+    config.headers.set("x-tenant-id", activeTenantId);
+  }
+  return config;
+});
+
 // Coalesces concurrent 401s into a single refresh call instead of firing
 // one refresh request per failed request.
 let refreshPromise: Promise<void> | null = null;
