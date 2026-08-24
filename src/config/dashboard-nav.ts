@@ -6,7 +6,9 @@ import {
   CalendarDays,
   Calendar,
   CircleDollarSign,
+  CreditCard,
   GitMerge,
+  Images,
   Inbox,
   LayoutDashboard,
   Megaphone,
@@ -64,13 +66,14 @@ export const NAV_GROUPS: NavGroup[] = [
       { href: "/panel", labelKey: "dashboard", icon: LayoutDashboard },
       { href: "/bandeja", labelKey: "inbox", icon: Inbox },
       { href: "/notificaciones", labelKey: "notifications", icon: Bell },
+      { href: "/medios", labelKey: "media", icon: Images },
     ],
   },
   {
     labelKey: "operations",
     items: [
       { href: "/servicios", labelKey: "services", icon: ConciergeBell },
-      { href: "/doctores", labelKey: "staff", icon: Stethoscope, upcoming: true },
+      { href: "/personal", labelKey: "staff", icon: Stethoscope },
       { href: "/pacientes", labelKey: "patients", icon: Users, upcoming: true },
       { href: "/citas", labelKey: "appointments", icon: CalendarDays, upcoming: true },
       { href: "/calendario", labelKey: "calendar", icon: Calendar, upcoming: true },
@@ -100,6 +103,7 @@ export const NAV_GROUPS: NavGroup[] = [
     labelKey: "configuration",
     items: [
       { href: "/ajustes", labelKey: "settings", icon: Settings },
+      { href: "/metodos-pago", labelKey: "paymentMethods", icon: CreditCard },
       { href: "/integraciones", labelKey: "integrations", icon: Blocks, upcoming: true },
     ],
   },
@@ -113,7 +117,9 @@ export const NAV_ITEMS: NavItem[] = NAV_GROUPS.flatMap((group) => group.items);
  *
  * `contacts` and `flows` are inherited wacrm screens the new IA does not
  * surface — Pacientes supersedes Contactos, and Flows is folded into
- * Automatizaciones. They still resolve (and stay protected by the /dashboard
- * prefix) so existing links and bookmarks do not break.
+ * Automatizaciones. `/doctores` is the old placeholder for this same "staff"
+ * section, superseded by /personal (Módulo 04). They still resolve (and stay
+ * protected by the /dashboard prefix) so existing links and bookmarks do not
+ * break.
  */
-export const UNLISTED_ROUTES = ["/contactos", "/flujos"];
+export const UNLISTED_ROUTES = ["/contactos", "/flujos", "/doctores"];

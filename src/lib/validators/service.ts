@@ -14,7 +14,7 @@ import { z } from "zod";
 
 export const SERVICE_STRUCTURE_TYPES = ["SINGLE", "SESSIONS"] as const;
 export const SERVICE_AVAILABILITY_TYPES = ["GENERAL", "CUSTOM"] as const;
-export const SERVICE_PAYMENT_METHODS = ["IN_PERSON", "ONLINE", "DEPOSIT"] as const;
+export const SERVICE_PAYMENT_METHODS = ["IN_PERSON", "ONLINE", "DEPOSIT", "FULL_PAYMENT"] as const;
 
 export type ServiceStructureType = (typeof SERVICE_STRUCTURE_TYPES)[number];
 export type ServiceAvailabilityType = (typeof SERVICE_AVAILABILITY_TYPES)[number];
@@ -50,6 +50,12 @@ export const COMMON_CONTRAINDICATIONS = [
 
 // --- Tipos de la API -------------------------------------------------------
 
+/** Mirrors CategoriesService.DEFAULT_CATEGORY_NAME on the backend — the
+ *  fallback every service without a real category (or whose category was
+ *  deleted) lands in. The API refuses to delete it; the UI hides that action
+ *  instead of letting the user hit the 409. */
+export const DEFAULT_CATEGORY_NAME = "Sin categoría";
+
 export interface CategorySummary {
   id: string;
   name: string;
@@ -64,6 +70,21 @@ export interface ServiceCategory extends CategorySummary {
   updatedAt: string;
   /** Present on GET /services/categories; drives the deactivate warning. */
   _count?: { services: number };
+}
+
+/**
+ * One paquete de sesiones ofrecido por un servicio SESSIONS — un mismo
+ * tratamiento puede vender varios a la vez (ej. "3 sesiones" y "6 sesiones"),
+ * de ahí la lista en vez de un sessionCount/packagePrice único en Service.
+ */
+export interface ServicePackage {
+  id: string;
+  serviceId: string;
+  sessionCount: number;
+  frequencyDays: number | null;
+  /** String de 2 decimales, misma convención que el resto del dinero. */
+  price: string;
+  createdAt: string;
 }
 
 /**
@@ -85,10 +106,9 @@ export interface Service {
   mainImageUrl: string | null;
   testimonioGallery: string[];
   structureType: ServiceStructureType;
-  sessionCount: number | null;
-  frequencyDays: number | null;
   singlePrice: string;
-  packagePrice: string | null;
+  /** Only populated (and only meaningful) when structureType === SESSIONS. */
+  packages: ServicePackage[];
   requiresEvaluation: boolean;
   evaluationServiceId: string | null;
   evaluationCost: string | null;
@@ -100,7 +120,9 @@ export interface Service {
   bufferMinutes: number;
   contraindications: string[];
   prePostCare: string | null;
-  paymentMethod: ServicePaymentMethod;
+  /** Un mismo servicio puede aceptar varias formas de cobro a la vez (ej. "en
+   *  caja" y "anticipo"), de ahí la lista en vez de un valor único. */
+  paymentMethods: ServicePaymentMethod[];
   depositAmount: string | null;
   depositIsPercentage: boolean;
   isActive: boolean;
@@ -198,6 +220,53 @@ const moneyField = (label: string) =>
 const optionalMoneyField = (label: string) =>
   moneyField(label).optional().or(z.literal(""));
 
+/**
+ * Strips every keystroke that isn't a digit or the first decimal separator —
+ * used as the price inputs' onChange so the field can never hold letters or a
+ * second ".", instead of only catching it at submit time via moneyField's
+ * regex. Accepts "." and "," (Peruvian spreadsheets/keyboards use both) but
+ * keeps just one of whichever comes first.
+ */
+export function sanitizeMoneyInput(raw: string): string {
+  let sawSeparator = false;
+  let result = "";
+  for (const char of raw) {
+    if (char >= "0" && char <= "9") {
+      result += char;
+    } else if ((char === "." || char === ",") && !sawSeparator) {
+      sawSeparator = true;
+      result += char;
+    }
+  }
+  return result;
+}
+
+/** Same idea for whole-number fields (sesiones, días) — digits only. */
+export function sanitizeIntInput(raw: string): string {
+  return raw.replace(/[^\d]/g, "");
+}
+
+/**
+ * Minutes (as the form/API store duration and buffer) <-> "HH:MM" (what an
+ * `<input type="time">` speaks). Duración/limpieza tab uses a time picker
+ * instead of a bare number field, but the stored unit stays minutes — nothing
+ * downstream (agenda, DTOs, tests) needs to change.
+ */
+export function minutesToTimeString(minutes: string | number | undefined): string {
+  const total = Math.max(0, Math.floor(Number(minutes) || 0));
+  const hh = Math.floor(total / 60)
+    .toString()
+    .padStart(2, "0");
+  const mm = (total % 60).toString().padStart(2, "0");
+  return `${hh}:${mm}`;
+}
+
+export function timeStringToMinutes(time: string): string {
+  const [hh = "0", mm = "0"] = time.split(":");
+  const total = (Number(hh) || 0) * 60 + (Number(mm) || 0);
+  return String(total);
+}
+
 const intField = (label: string, min: number, max: number) =>
   z
     .string()
@@ -211,6 +280,24 @@ const optionalIntField = (label: string, min: number, max: number) =>
   intField(label, min, max).optional().or(z.literal(""));
 
 const isBlank = (value: string | undefined) => value === undefined || value.trim() === "";
+
+/** One paquete de sesiones as the form edits it (spec ampliación: un mismo
+ *  servicio puede vender varios paquetes a la vez). Money and counts stay
+ *  strings for the same reason every other numeric form field does — see
+ *  moneyField's doc comment. */
+export const packageFieldSchema = z.object({
+  sessionCount: intField("El número de sesiones", 2, MAX_SESSIONS),
+  frequencyDays: optionalIntField("Los días entre sesiones", 0, 365),
+  price: moneyField("El precio del paquete"),
+});
+
+export type ServicePackageFormInput = z.infer<typeof packageFieldSchema>;
+
+export const EMPTY_SERVICE_PACKAGE: ServicePackageFormInput = {
+  sessionCount: "",
+  frequencyDays: "",
+  price: "",
+};
 
 /**
  * Full service form. The conditional rules are expressed with superRefine
@@ -226,12 +313,28 @@ export const serviceSchema = z
       .trim()
       .min(1, "El nombre del servicio es obligatorio.")
       .max(150, "El nombre no puede superar los 150 caracteres."),
-    categoryId: z.string().uuid("Selecciona una categoría."),
+    // Absent when `newCategory` is true — an existing categoryId and a
+    // fresh one being created on the fly are mutually exclusive, enforced
+    // below in superRefine (Módulo 03 mejora: crear categoría on-the-fly).
+    categoryId: z.string().optional().or(z.literal("")),
+    newCategory: z.boolean(),
+    newCategoryName: z
+      .string()
+      .trim()
+      .max(80, "El nombre no puede superar los 80 caracteres.")
+      .optional(),
+    newCategoryColor: z
+      .string()
+      .trim()
+      .regex(/^#[0-9A-Fa-f]{6}$/, "El color debe ser un hexadecimal de 6 dígitos.")
+      .optional()
+      .or(z.literal("")),
     commercialDescription: z
       .string()
       .trim()
-      .min(1, "La descripción comercial es obligatoria.")
-      .max(5000, "La descripción no puede superar los 5000 caracteres."),
+      .max(5000, "La descripción no puede superar los 5000 caracteres.")
+      .optional()
+      .or(z.literal("")),
     mainImageUrl: z.string().optional().or(z.literal("")),
     testimonioGallery: z
       .array(z.string())
@@ -240,10 +343,9 @@ export const serviceSchema = z
 
     // Tab 2
     structureType: z.enum(SERVICE_STRUCTURE_TYPES),
-    sessionCount: optionalIntField("El número de sesiones", 2, MAX_SESSIONS),
-    frequencyDays: optionalIntField("Los días entre sesiones", 0, 365),
     singlePrice: moneyField("El precio unitario"),
-    packagePrice: optionalMoneyField("El precio del paquete"),
+    /** Uno o más paquetes cuando structureType = SESSIONS; ignorado en SINGLE. */
+    packages: z.array(packageFieldSchema),
 
     // Tab 3
     requiresEvaluation: z.boolean(),
@@ -262,28 +364,39 @@ export const serviceSchema = z
     prePostCare: z.string().trim().max(5000, "Máximo 5000 caracteres.").optional(),
 
     // Tab 5
-    paymentMethod: z.enum(SERVICE_PAYMENT_METHODS),
+    /** Selección múltiple (spec ampliación §5): un servicio puede aceptar
+     *  varias formas de cobro a la vez, no solo una. */
+    paymentMethods: z
+      .array(z.enum(SERVICE_PAYMENT_METHODS))
+      .min(1, "Selecciona al menos un método de pago."),
     depositAmount: optionalMoneyField("El anticipo"),
     depositIsPercentage: z.boolean(),
 
     isActive: z.boolean(),
   })
   .superRefine((data, ctx) => {
-    if (data.structureType === "SESSIONS") {
-      if (isBlank(data.sessionCount)) {
+    if (data.newCategory) {
+      if (isBlank(data.newCategoryName)) {
         ctx.addIssue({
           code: "custom",
-          path: ["sessionCount"],
-          message: "Un paquete debe indicar cuántas sesiones incluye.",
+          path: ["newCategoryName"],
+          message: "El nombre de la nueva categoría es obligatorio.",
         });
       }
-      if (isBlank(data.packagePrice)) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["packagePrice"],
-          message: "Un paquete debe indicar su precio total.",
-        });
-      }
+    } else if (isBlank(data.categoryId)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["categoryId"],
+        message: "Selecciona una categoría.",
+      });
+    }
+
+    if (data.structureType === "SESSIONS" && data.packages.length === 0) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["packages"],
+        message: "Agrega al menos un paquete de sesiones.",
+      });
     }
 
     if (data.requiresEvaluation && isBlank(data.evaluationServiceId)) {
@@ -294,7 +407,7 @@ export const serviceSchema = z
       });
     }
 
-    if (data.paymentMethod === "DEPOSIT") {
+    if (data.paymentMethods.includes("DEPOSIT")) {
       if (isBlank(data.depositAmount)) {
         ctx.addIssue({
           code: "custom",
@@ -321,14 +434,15 @@ export type ServiceFormInput = z.infer<typeof serviceSchema>;
 export const EMPTY_SERVICE_FORM: ServiceFormInput = {
   name: "",
   categoryId: "",
+  newCategory: false,
+  newCategoryName: "",
+  newCategoryColor: "",
   commercialDescription: "",
   mainImageUrl: "",
   testimonioGallery: [],
   structureType: "SINGLE",
-  sessionCount: "",
-  frequencyDays: "",
   singlePrice: "",
-  packagePrice: "",
+  packages: [],
   requiresEvaluation: false,
   evaluationServiceId: "",
   evaluationCost: "",
@@ -338,7 +452,7 @@ export const EMPTY_SERVICE_FORM: ServiceFormInput = {
   bufferMinutes: "0",
   contraindications: [],
   prePostCare: "",
-  paymentMethod: "IN_PERSON",
+  paymentMethods: ["IN_PERSON"],
   depositAmount: "",
   depositIsPercentage: false,
   isActive: true,
@@ -350,14 +464,19 @@ export function toServiceForm(service: Service): ServiceFormInput {
   return {
     name: service.name,
     categoryId: service.categoryId,
+    newCategory: false,
+    newCategoryName: "",
+    newCategoryColor: "",
     commercialDescription: service.commercialDescription,
     mainImageUrl: service.mainImageUrl ?? "",
     testimonioGallery: service.testimonioGallery ?? [],
     structureType: service.structureType,
-    sessionCount: service.sessionCount?.toString() ?? "",
-    frequencyDays: service.frequencyDays?.toString() ?? "",
     singlePrice: service.singlePrice,
-    packagePrice: service.packagePrice ?? "",
+    packages: (service.packages ?? []).map((pkg) => ({
+      sessionCount: pkg.sessionCount.toString(),
+      frequencyDays: pkg.frequencyDays?.toString() ?? "",
+      price: pkg.price,
+    })),
     requiresEvaluation: service.requiresEvaluation,
     evaluationServiceId: service.evaluationServiceId ?? "",
     evaluationCost: service.evaluationCost ?? "",
@@ -367,7 +486,7 @@ export function toServiceForm(service: Service): ServiceFormInput {
     bufferMinutes: service.bufferMinutes.toString(),
     contraindications: service.contraindications ?? [],
     prePostCare: service.prePostCare ?? "",
-    paymentMethod: service.paymentMethod,
+    paymentMethods: service.paymentMethods.length > 0 ? service.paymentMethods : ["IN_PERSON"],
     depositAmount: service.depositAmount ?? "",
     depositIsPercentage: service.depositIsPercentage,
     isActive: service.isActive,
@@ -387,23 +506,35 @@ const toText = (value: string | undefined): string | undefined =>
  * strings: the API runs with `forbidNonWhitelisted`, and an empty string in a
  * numeric field is a 400. The server nulls out the irrelevant columns itself,
  * so omitting is both correct and less to send.
+ *
+ * `categoryId` must already be resolved to a real id by the caller — when
+ * `newCategory` is true, ServiceFormDialog creates the category first and
+ * passes its id in here via `{ ...form, categoryId: created.id }`. This
+ * function never talks to the API itself, so it cannot do that step.
  */
 export function toServicePayload(form: ServiceFormInput): Record<string, unknown> {
   const isPackage = form.structureType === "SESSIONS";
-  const isDeposit = form.paymentMethod === "DEPOSIT";
+  const isDeposit = form.paymentMethods.includes("DEPOSIT");
 
   return {
     name: form.name.trim(),
     categoryId: form.categoryId,
-    commercialDescription: form.commercialDescription.trim(),
+    commercialDescription: toText(form.commercialDescription) ?? "",
     mainImageUrl: toText(form.mainImageUrl),
     testimonioGallery: form.testimonioGallery ?? [],
 
     structureType: form.structureType,
-    sessionCount: isPackage ? toNumber(form.sessionCount) : undefined,
-    frequencyDays: isPackage ? toNumber(form.frequencyDays) : undefined,
     singlePrice: toNumber(form.singlePrice),
-    packagePrice: isPackage ? toNumber(form.packagePrice) : undefined,
+    // Sent as the complete list on every write — the backend replaces the
+    // whole set rather than diffing (see ServicesService.update's doc
+    // comment), so omitting a package here would delete it there.
+    packages: isPackage
+      ? form.packages.map((pkg) => ({
+          sessionCount: toNumber(pkg.sessionCount),
+          frequencyDays: toNumber(pkg.frequencyDays),
+          price: toNumber(pkg.price),
+        }))
+      : undefined,
 
     requiresEvaluation: form.requiresEvaluation,
     evaluationServiceId: form.requiresEvaluation ? toText(form.evaluationServiceId) : undefined,
@@ -419,7 +550,7 @@ export function toServicePayload(form: ServiceFormInput): Record<string, unknown
     contraindications: form.contraindications ?? [],
     prePostCare: toText(form.prePostCare),
 
-    paymentMethod: form.paymentMethod,
+    paymentMethods: form.paymentMethods,
     depositAmount: isDeposit ? toNumber(form.depositAmount) : undefined,
     depositIsPercentage: isDeposit ? form.depositIsPercentage : false,
 

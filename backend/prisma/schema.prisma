@@ -37,6 +37,7 @@ model User {
   refreshTokens     RefreshToken[]
   ownedTenants      Tenant[]
   tenantMemberships TenantUser[]
+  staffProfile      StaffMember?
 
   @@index([email])
 }
@@ -111,9 +112,66 @@ model Tenant {
   users             TenantUser[]
   serviceCategories ServiceCategory[]
   services          Service[]
+  specialties       Specialty[]
+  staffMembers      StaffMember[]
+  mediaAssets       MediaAsset[]
+  paymentMethods    PaymentMethodConfig[]
 
   @@index([taxId])
   @@index([ownerId])
+}
+
+// Biblioteca de medios (menú "Medios"): imágenes, video, PDF y GIF que el
+// tenant sube para usarlos en el catálogo, campañas o el agente de IA.
+enum MediaKind {
+  IMAGE
+  VIDEO
+  PDF
+  GIF
+}
+
+model MediaAsset {
+  id        String    @id @default(uuid())
+  tenantId  String
+  tenant    Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  fileName  String
+  url       String
+  mimeType  String
+  kind      MediaKind
+  sizeBytes Int
+  createdAt DateTime  @default(now())
+
+  @@index([tenantId, createdAt])
+}
+
+// Métodos de cobro que el tenant habilita para que la IA genere el link de
+// pago correspondiente (menú "Métodos de pago").
+enum PaymentMethodType {
+  MERCADO_PAGO
+  YAPE
+  PLIN
+  BANK_ACCOUNT
+  OTHER
+}
+
+model PaymentMethodConfig {
+  id        String            @id @default(uuid())
+  tenantId  String
+  tenant    Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  type      PaymentMethodType
+  // Nombre visible ("BCP Ahorros", "Yape del centro") — varios tenants
+  // pueden querer más de una cuenta bancaria o número Yape a la vez.
+  label     String
+  isEnabled Boolean           @default(true)
+  // Campos propios de cada método (teléfono Yape/Plin, datos de cuenta
+  // bancaria, credenciales de Mercado Pago) — Json en vez de columnas fijas
+  // que quedarían vacías para los demás tipos; PaymentMethodsService valida
+  // la forma según `type` antes de guardar.
+  details   Json
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+
+  @@index([tenantId])
 }
 
 // Sede. El onboarding crea sólo la principal (isMain), pero el modelo admite
@@ -194,6 +252,7 @@ enum ServicePaymentMethod {
   IN_PERSON // Pago en caja al momento de la atención
   ONLINE // Pago total anticipado por pasarela
   DEPOSIT // Anticipo parcial (ver depositAmount / depositIsPercentage)
+  FULL_PAYMENT // Pago completo (anticipado o en el momento, sin anticipo parcial)
 }
 
 // Agrupación de tratamientos ("Facial", "Corporal", "Depilación Láser").
@@ -243,12 +302,13 @@ model Service {
 
   // --- Bloque 2: Estructura comercial y paquetes ---
   structureType ServiceStructureType @default(SINGLE)
-  sessionCount  Int? // Sólo si structureType = SESSIONS
-  frequencyDays Int? // Días mínimos entre sesiones (control de agenda de la IA)
   // Decimal(10,2), no Float: los precios se suman y comparan en facturación y
   // el binario flotante no representa exactamente los céntimos.
   singlePrice   Decimal              @db.Decimal(10, 2)
-  packagePrice  Decimal?             @db.Decimal(10, 2)
+  // Un servicio SESSIONS puede ofrecer varios paquetes a la vez (ej. "3
+  // sesiones" y "6 sesiones" del mismo tratamiento, cada uno con su propio
+  // precio y frecuencia) — de ahí la relación en vez de columnas escalares.
+  packages      ServicePackage[]
 
   // --- Bloque 3: Filtro clínico y valoración ---
   requiresEvaluation       Boolean   @default(false)
@@ -273,18 +333,150 @@ model Service {
   prePostCare       String?                 @db.Text
 
   // --- Bloque 5: Condiciones de pago ---
-  paymentMethod       ServicePaymentMethod @default(IN_PERSON)
+  // Un mismo servicio puede aceptar varias formas de cobro a la vez (ej. "en
+  // caja" y "anticipo") — de ahí el arreglo en vez de un valor único.
+  paymentMethods      ServicePaymentMethod[] @default([IN_PERSON])
   // Monto fijo en soles, o porcentaje 0-100 si depositIsPercentage = true.
-  depositAmount       Decimal?             @db.Decimal(10, 2)
-  depositIsPercentage Boolean              @default(false)
+  depositAmount       Decimal?                @db.Decimal(10, 2)
+  depositIsPercentage Boolean                 @default(false)
 
   isActive  Boolean  @default(true) // Baja lógica (spec §3, DELETE /services/:id)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  staffAssignments StaffService[]
 
   // El listado siempre filtra por tenant y casi siempre por estado o
   // categoría; Prisma no indexa las FK automáticamente en PostgreSQL.
   @@index([tenantId, isActive])
   @@index([categoryId])
   @@index([evaluationServiceId])
+}
+
+// Un paquete de sesiones ofrecido para un Service SESSIONS (spec ampliación:
+// "un mismo servicio puede vender un paquete de 3 sesiones y otro de 6").
+// Sólo tiene sentido junto a structureType = SESSIONS; ServicesService
+// reemplaza el conjunto completo en cada escritura (igual que
+// StaffMembersService hace con StaffSchedule) en vez de diffear filas.
+model ServicePackage {
+  id            String   @id @default(uuid())
+  serviceId     String
+  service       Service  @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  sessionCount  Int
+  // Días mínimos entre sesiones (control de agenda de la IA) — opcional,
+  // igual que antes en el campo escalar que reemplaza.
+  frequencyDays Int?
+  price         Decimal  @db.Decimal(10, 2)
+  createdAt     DateTime @default(now())
+
+  @@index([serviceId])
+}
+
+// ---------------------------------------------------------------------------
+// Feature 04 — Doctores, Especialidades y Gestión de Personal (Staff)
+// (.specify/features/04-staff/spec.md)
+// ---------------------------------------------------------------------------
+
+// Especialidad médica/estética del Tenant (ej. "Dermatología", "Cosmiatría").
+model Specialty {
+  id          String   @id @default(uuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  // Baja lógica (spec §2.1), igual que ServiceCategory: no romper el
+  // historial de StaffMember que ya apunta a esta especialidad.
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  staffMembers StaffMember[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+}
+
+// Perfil del profesional/especialista de la clínica. `userId` es opcional
+// (spec §2.3): sólo se vincula a User cuando el doctor tiene acceso propio
+// al sistema, y es 1:1 — un usuario no puede ser dos perfiles de staff a
+// la vez.
+model StaffMember {
+  id          String     @id @default(uuid())
+  tenantId    String
+  tenant      Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  userId      String?    @unique
+  // SetNull, no Cascade: borrar la cuenta de usuario no debe arrastrar el
+  // perfil profesional (historial de citas, comisiones, etc. siguen vivos).
+  user        User?      @relation(fields: [userId], references: [id], onDelete: SetNull)
+  specialtyId String?
+  specialty   Specialty? @relation(fields: [specialtyId], references: [id], onDelete: SetNull)
+
+  firstName            String
+  lastName             String
+  medicalLicense       String?
+  email                String?
+  phone                String?
+  avatarUrl            String?
+  biography            String?  @db.Text
+  // Código HEX (#RRGGBB) para el badge del calendario, igual que ServiceCategory.color.
+  color                String?  @db.VarChar(7)
+  // Porcentaje 0-100.00; Decimal(5,2) alcanza sin desperdiciar precisión.
+  commissionPercentage Decimal? @db.Decimal(5, 2)
+  isActive             Boolean  @default(true) // Baja lógica (spec §3, DELETE /staff/:id)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  services  StaffService[]
+  schedules StaffSchedule[]
+  absences  StaffAbsence[]
+
+  @@index([tenantId, isActive])
+  @@index([specialtyId])
+}
+
+// Matriz de competencias: qué servicios del Módulo 03 puede ejecutar cada
+// profesional, con duración personalizada opcional.
+model StaffService {
+  id                    String      @id @default(uuid())
+  staffMemberId         String
+  staffMember           StaffMember @relation(fields: [staffMemberId], references: [id], onDelete: Cascade)
+  serviceId             String
+  // Cascade (spec plan §1): si el servicio se elimina del catálogo, la
+  // vinculación de competencia deja de tener sentido.
+  service               Service     @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  customDurationMinutes Int?
+  createdAt             DateTime    @default(now())
+
+  @@unique([staffMemberId, serviceId])
+  @@index([serviceId])
+}
+
+// Horario recurrente semanal. Un StaffMember puede tener varias filas por
+// día si en el futuro se necesitan turnos partidos adicionales al almuerzo;
+// hoy la UI (spec §4) sólo genera una por día.
+model StaffSchedule {
+  id             String      @id @default(uuid())
+  staffMemberId  String
+  staffMember    StaffMember @relation(fields: [staffMemberId], references: [id], onDelete: Cascade)
+  dayOfWeek      Int // 0 = Domingo, 1 = Lunes, ..., 6 = Sábado
+  startTime      String // Formato "HH:mm" (ej. "08:00")
+  endTime        String // Formato "HH:mm" (ej. "17:00")
+  lunchStartTime String? // Formato "HH:mm" (ej. "13:00")
+  lunchEndTime   String? // Formato "HH:mm" (ej. "14:00")
+  isActive       Boolean     @default(true)
+
+  @@index([staffMemberId])
+}
+
+// Excepción puntual al horario habitual (vacaciones, licencias, permisos).
+model StaffAbsence {
+  id            String      @id @default(uuid())
+  staffMemberId String
+  staffMember   StaffMember @relation(fields: [staffMemberId], references: [id], onDelete: Cascade)
+  reason        String
+  startDate     DateTime
+  endDate       DateTime
+  createdAt     DateTime    @default(now())
+
+  @@index([staffMemberId])
 }

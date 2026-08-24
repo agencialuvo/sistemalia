@@ -256,4 +256,8 @@ html[data-theme="rose"] {
   h6 {
     color: var(--title-foreground);
   }
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]) {
+    cursor: pointer;
+  }
 }

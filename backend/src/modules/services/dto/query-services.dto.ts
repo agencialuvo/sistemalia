@@ -1,5 +1,6 @@
 import { Transform } from 'class-transformer';
 import { IsBoolean, IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
+import { PaginationQueryDto } from '../../../common/dto/pagination-query.dto';
 
 /**
  * Query-string booleans arrive as the strings "true"/"false".
@@ -16,7 +17,7 @@ const toBoolean = ({ value }: { value: unknown }) => {
 };
 
 /** Filters for GET /services (spec §3: categoría, búsqueda por texto, estado). */
-export class QueryServicesDto {
+export class QueryServicesDto extends PaginationQueryDto {
   @IsOptional()
   @IsUUID('4', { message: 'El filtro de categoría no es válido.' })
   categoryId?: string;

@@ -175,6 +175,14 @@ export class ExcelImportService {
       }
 
       if (rowErrors.length === 0) {
+        // The sheet still has one flat "N° de sesiones" / "Precio del
+        // paquete" column each — a spreadsheet has no sensible way to
+        // express the multi-paquete list the form now supports (same
+        // reasoning as evaluationServiceId, see ImportServiceRowDto's doc
+        // comment) — so an imported SESSIONS row always becomes exactly one
+        // ServicePackageDto. Extra packages are added afterwards from the UI.
+        this.applyPackageShape(candidate);
+        this.applyPaymentMethodShape(candidate);
         rowErrors.push(...this.validateRow(candidate, rowNumber));
       }
 
@@ -497,6 +505,33 @@ export class ExcelImportService {
 
     const parsed = Number(text);
     return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  /** Folds the row's flat sessionCount/frequencyDays/packagePrice cells into
+   *  the single-element `packages` array ImportServiceRowDto now expects.
+   *  Called only after checkRequired has confirmed those cells are present
+   *  for a SESSIONS row, so the values being read here are never undefined. */
+  private applyPackageShape(candidate: Record<string, unknown>): void {
+    if (candidate.structureType === ServiceStructureType.SESSIONS) {
+      candidate.packages = [
+        {
+          sessionCount: candidate.sessionCount,
+          frequencyDays: candidate.frequencyDays,
+          price: candidate.packagePrice,
+        },
+      ];
+    }
+    delete candidate.sessionCount;
+    delete candidate.frequencyDays;
+    delete candidate.packagePrice;
+  }
+
+  /** A spreadsheet cell can only name one payment method per row — the form
+   *  is where a second one gets added afterwards, same reasoning as
+   *  applyPackageShape above. */
+  private applyPaymentMethodShape(candidate: Record<string, unknown>): void {
+    candidate.paymentMethods = [candidate.paymentMethod ?? ServicePaymentMethod.IN_PERSON];
+    delete candidate.paymentMethod;
   }
 
   /** Runs the shared DTO decorators over the coerced row. */

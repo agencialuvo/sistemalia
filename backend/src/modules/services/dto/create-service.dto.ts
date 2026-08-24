@@ -6,6 +6,7 @@ import {
 import { Transform, Type } from 'class-transformer';
 import {
   ArrayMaxSize,
+  ArrayMinSize,
   IsArray,
   IsBoolean,
   IsEnum,
@@ -21,8 +22,10 @@ import {
   MaxLength,
   Min,
   ValidateIf,
+  ValidateNested,
 } from 'class-validator';
 import { IsDepositAmount } from '../validators/is-deposit-amount.validator';
+import { ServicePackageDto } from './service-package.dto';
 
 /** Longest treatment we accept in one appointment: 12h. Guards against a typo
  *  (600 instead of 60) silently blocking a whole week of the agenda. */
@@ -56,11 +59,11 @@ export class CreateServiceDto {
   @MaxLength(150, { message: 'El nombre no puede superar los 150 caracteres.' })
   name!: string;
 
-  @IsString({ message: 'La descripción comercial es obligatoria.' })
+  @IsOptional()
+  @IsString({ message: 'La descripción debe ser texto.' })
   @Transform(trim)
-  @IsNotEmpty({ message: 'La descripción comercial es obligatoria.' })
   @MaxLength(5000, { message: 'La descripción no puede superar los 5000 caracteres.' })
-  commercialDescription!: string;
+  commercialDescription?: string;
 
   @IsOptional()
   @IsUrl({ require_tld: false }, { message: 'La URL de la imagen principal no es válida.' })
@@ -79,37 +82,26 @@ export class CreateServiceDto {
   })
   structureType!: ServiceStructureType;
 
-  /** Required for SESSIONS: a "package" of one session is just a SINGLE. */
-  @ValidateIf((o: CreateServiceDto) => o.structureType === ServiceStructureType.SESSIONS)
-  @Type(() => Number)
-  @IsInt({ message: 'Indica cuántas sesiones incluye el paquete.' })
-  @Min(2, { message: 'Un paquete debe tener al menos 2 sesiones.' })
-  @Max(100, { message: 'Un paquete no puede superar las 100 sesiones.' })
-  sessionCount?: number;
-
-  /** Optional even for SESSIONS: not every treatment imposes a minimum gap. */
-  @IsOptional()
-  @Type(() => Number)
-  @IsInt({ message: 'Los días entre sesiones deben ser un número entero.' })
-  @Min(0, { message: 'Los días entre sesiones no pueden ser negativos.' })
-  @Max(365, { message: 'Los días entre sesiones no pueden superar 365.' })
-  frequencyDays?: number;
-
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 2 }, { message: 'El precio admite máximo 2 decimales.' })
   @Min(0, { message: 'El precio no puede ser negativo.' })
   @Max(MAX_PRICE, { message: 'El precio supera el máximo permitido.' })
   singlePrice!: number;
 
+  /**
+   * Required for SESSIONS, at least one entry: a service can now sell
+   * several packages of the same tratamiento at once (ampliación: "3
+   * sesiones" y "6 sesiones" del mismo servicio). ServicesService replaces
+   * the whole set on every write — see its doc comment — the same
+   * whole-resource convention StaffMembersService uses for schedules.
+   */
   @ValidateIf((o: CreateServiceDto) => o.structureType === ServiceStructureType.SESSIONS)
-  @Type(() => Number)
-  @IsNumber(
-    { maxDecimalPlaces: 2 },
-    { message: 'Indica el precio total del paquete (máximo 2 decimales).' },
-  )
-  @Min(0, { message: 'El precio del paquete no puede ser negativo.' })
-  @Max(MAX_PRICE, { message: 'El precio del paquete supera el máximo permitido.' })
-  packagePrice?: number;
+  @IsArray({ message: 'Indica al menos un paquete de sesiones.' })
+  @ArrayMinSize(1, { message: 'Indica al menos un paquete de sesiones.' })
+  @ArrayMaxSize(20, { message: 'Un servicio admite hasta 20 paquetes distintos.' })
+  @ValidateNested({ each: true })
+  @Type(() => ServicePackageDto)
+  packages?: ServicePackageDto[];
 
   // --- Bloque 3: Filtro clínico y valoración ---
 
@@ -194,11 +186,18 @@ export class CreateServiceDto {
 
   // --- Bloque 5: Condiciones de pago ---
 
+  /**
+   * A service can accept more than one way to be paid at once (ej. "en caja"
+   * y "anticipo" a la vez) — hence the list instead of a single enum value.
+   */
   @IsOptional()
+  @IsArray({ message: 'Los métodos de pago deben ser una lista.' })
+  @ArrayMinSize(1, { message: 'Selecciona al menos un método de pago.' })
   @IsEnum(ServicePaymentMethod, {
-    message: 'El método de pago debe ser IN_PERSON, ONLINE o DEPOSIT.',
+    each: true,
+    message: 'Cada método de pago debe ser IN_PERSON, ONLINE, DEPOSIT o FULL_PAYMENT.',
   })
-  paymentMethod?: ServicePaymentMethod;
+  paymentMethods?: ServicePaymentMethod[];
 
   @IsOptional()
   @IsBoolean({ message: 'Indica con sí o no si el anticipo es un porcentaje.' })
@@ -210,7 +209,7 @@ export class CreateServiceDto {
    * the validator for why two @ValidateIf branches would silently disable the
    * check entirely.
    */
-  @ValidateIf((o: CreateServiceDto) => o.paymentMethod === ServicePaymentMethod.DEPOSIT)
+  @ValidateIf((o: CreateServiceDto) => (o.paymentMethods ?? []).includes(ServicePaymentMethod.DEPOSIT))
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 2 }, { message: 'Indica el anticipo requerido.' })
   @Max(MAX_PRICE, { message: 'El anticipo supera el máximo permitido.' })

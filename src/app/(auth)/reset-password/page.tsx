@@ -7,6 +7,7 @@ import { useForm } from "react-hook-form";
 import { ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { PasswordInput } from "@/components/ui/password-input";
 import { Label } from "@/components/ui/label";
 import {
   Card,
@@ -84,7 +85,7 @@ function ResetPasswordPageInner() {
                 <Label htmlFor="newPassword" className="text-muted-foreground">
                   Nueva contraseña
                 </Label>
-                <Input id="newPassword" type="password" {...register("newPassword")} />
+                <PasswordInput id="newPassword" {...register("newPassword")} />
                 {errors.newPassword && (
                   <p className="text-sm text-red-400">{errors.newPassword.message}</p>
                 )}

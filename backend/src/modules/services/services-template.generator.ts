@@ -39,6 +39,7 @@ export const PAYMENT_LABELS = {
   'EN CAJA': 'IN_PERSON',
   ONLINE: 'ONLINE',
   ANTICIPO: 'DEPOSIT',
+  'PAGO COMPLETO': 'FULL_PAYMENT',
 } as const;
 export const BOOLEAN_LABELS = { SÍ: true, NO: false } as const;
 export const STATUS_LABELS = { ACTIVO: true, INACTIVO: false } as const;
@@ -181,7 +182,7 @@ export const SERVICE_COLUMNS: ColumnDef[] = [
     kind: 'enum',
     required: false,
     width: 17,
-    help: 'EN CAJA (por defecto), ONLINE (pago total anticipado) o ANTICIPO (pago parcial).',
+    help: 'EN CAJA (por defecto), ONLINE, ANTICIPO (pago parcial) o PAGO COMPLETO. La importación admite uno; se pueden sumar más desde el formulario.',
     options: Object.keys(PAYMENT_LABELS),
   },
   {

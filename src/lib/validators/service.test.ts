@@ -78,25 +78,32 @@ describe("serviceSchema", () => {
     expect(serviceSchema.safeParse(form()).success).toBe(true);
   });
 
-  it("rejects a package with no session count", () => {
-    const result = serviceSchema.safeParse(
-      form({ structureType: "SESSIONS", packagePrice: "600.00" }),
-    );
+  it("rejects SESSIONS with no packages at all", () => {
+    const result = serviceSchema.safeParse(form({ structureType: "SESSIONS", packages: [] }));
     expect(result.success).toBe(false);
-    expect(result.error?.issues[0]?.path).toEqual(["sessionCount"]);
+    expect(result.error?.issues[0]?.path).toEqual(["packages"]);
   });
 
-  it("rejects a package with no package price", () => {
+  it("rejects a package with no price", () => {
     const result = serviceSchema.safeParse(
-      form({ structureType: "SESSIONS", sessionCount: "6" }),
+      form({
+        structureType: "SESSIONS",
+        packages: [{ sessionCount: "6", frequencyDays: "", price: "" }],
+      }),
     );
     expect(result.success).toBe(false);
-    expect(result.error?.issues.map((issue) => issue.path[0])).toContain("packagePrice");
+    expect(result.error?.issues.map((issue) => issue.path.join("."))).toContain("packages.0.price");
   });
 
-  it("accepts a complete package", () => {
+  it("accepts a service with several packages", () => {
     const result = serviceSchema.safeParse(
-      form({ structureType: "SESSIONS", sessionCount: "6", packagePrice: "600.00" }),
+      form({
+        structureType: "SESSIONS",
+        packages: [
+          { sessionCount: "3", frequencyDays: "15", price: "400.00" },
+          { sessionCount: "6", frequencyDays: "15", price: "720.00" },
+        ],
+      }),
     );
     expect(result.success).toBe(true);
   });
@@ -108,14 +115,14 @@ describe("serviceSchema", () => {
   });
 
   it("requires an amount when the payment method is a deposit", () => {
-    const result = serviceSchema.safeParse(form({ paymentMethod: "DEPOSIT" }));
+    const result = serviceSchema.safeParse(form({ paymentMethods: ["DEPOSIT"] }));
     expect(result.success).toBe(false);
     expect(result.error?.issues[0]?.path).toEqual(["depositAmount"]);
   });
 
   it("caps a percentage deposit at 100", () => {
     const result = serviceSchema.safeParse(
-      form({ paymentMethod: "DEPOSIT", depositAmount: "120", depositIsPercentage: true }),
+      form({ paymentMethods: ["DEPOSIT"], depositAmount: "120", depositIsPercentage: true }),
     );
     expect(result.success).toBe(false);
     expect(result.error?.issues[0]?.message).toContain("entre 1 y 100");
@@ -123,7 +130,7 @@ describe("serviceSchema", () => {
 
   it("allows an amount above 100 when it is soles, not a percentage", () => {
     const result = serviceSchema.safeParse(
-      form({ paymentMethod: "DEPOSIT", depositAmount: "120", depositIsPercentage: false }),
+      form({ paymentMethods: ["DEPOSIT"], depositAmount: "120", depositIsPercentage: false }),
     );
     expect(result.success).toBe(true);
   });
@@ -142,7 +149,10 @@ describe("serviceSchema", () => {
 
   it("rejects a package of a single session", () => {
     const result = serviceSchema.safeParse(
-      form({ structureType: "SESSIONS", sessionCount: "1", packagePrice: "100.00" }),
+      form({
+        structureType: "SESSIONS",
+        packages: [{ sessionCount: "1", frequencyDays: "", price: "100.00" }],
+      }),
     );
     expect(result.success).toBe(false);
   });
@@ -163,18 +173,35 @@ describe("toServicePayload", () => {
    * The API runs with forbidNonWhitelisted and rejects an empty string in a
    * numeric field, so unused fields must be omitted rather than blanked.
    */
-  it("omits package fields for a single-session service", () => {
+  it("omits packages for a single-session service", () => {
     const payload = toServicePayload(
-      form({ structureType: "SINGLE", sessionCount: "6", packagePrice: "600.00" }),
+      form({
+        structureType: "SINGLE",
+        packages: [{ sessionCount: "6", frequencyDays: "", price: "600.00" }],
+      }),
     );
-    expect(payload.sessionCount).toBeUndefined();
-    expect(payload.packagePrice).toBeUndefined();
-    expect(payload.frequencyDays).toBeUndefined();
+    expect(payload.packages).toBeUndefined();
+  });
+
+  it("sends every package, converted to numbers, for a SESSIONS service", () => {
+    const payload = toServicePayload(
+      form({
+        structureType: "SESSIONS",
+        packages: [
+          { sessionCount: "3", frequencyDays: "15", price: "400.00" },
+          { sessionCount: "6", frequencyDays: "", price: "720.00" },
+        ],
+      }),
+    );
+    expect(payload.packages).toEqual([
+      { sessionCount: 3, frequencyDays: 15, price: 400 },
+      { sessionCount: 6, frequencyDays: undefined, price: 720 },
+    ]);
   });
 
   it("omits deposit fields when the payment is not a deposit", () => {
     const payload = toServicePayload(
-      form({ paymentMethod: "IN_PERSON", depositAmount: "30", depositIsPercentage: true }),
+      form({ paymentMethods: ["IN_PERSON"], depositAmount: "30", depositIsPercentage: true }),
     );
     expect(payload.depositAmount).toBeUndefined();
     expect(payload.depositIsPercentage).toBe(false);
@@ -228,10 +255,10 @@ describe("toServiceForm", () => {
     mainImageUrl: null,
     testimonioGallery: [],
     structureType: "SESSIONS",
-    sessionCount: 6,
-    frequencyDays: 30,
     singlePrice: "199.90",
-    packagePrice: "999.99",
+    packages: [
+      { id: "pkg1", serviceId: "svc", sessionCount: 6, frequencyDays: 30, price: "999.99", createdAt: "2026-08-19T00:00:00.000Z" },
+    ],
     requiresEvaluation: false,
     evaluationServiceId: null,
     evaluationCost: null,
@@ -243,7 +270,7 @@ describe("toServiceForm", () => {
     bufferMinutes: 10,
     contraindications: ["EMBARAZO"],
     prePostCare: null,
-    paymentMethod: "IN_PERSON",
+    paymentMethods: ["IN_PERSON"],
     depositAmount: null,
     depositIsPercentage: false,
     isActive: true,
@@ -259,7 +286,7 @@ describe("toServiceForm", () => {
   it("round-trips a price through edit without losing the cents", () => {
     const payload = toServicePayload(toServiceForm(service));
     expect(payload.singlePrice).toBe(199.9);
-    expect(payload.packagePrice).toBe(999.99);
+    expect(payload.packages).toEqual([{ sessionCount: 6, frequencyDays: 30, price: 999.99 }]);
     expect(toServiceForm(service).singlePrice).toBe("199.90");
   });
 

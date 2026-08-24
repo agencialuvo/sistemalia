@@ -1,17 +1,21 @@
-import { Prisma, Service, ServiceCategory } from '@prisma/client';
+import { Prisma, Service, ServiceCategory, ServicePackage } from '@prisma/client';
 
-/** The four Decimal columns of Service. Kept in one place so a new money field
- *  cannot be added to the model and forgotten by the serializer. */
-const MONEY_FIELDS = ['singlePrice', 'packagePrice', 'evaluationCost', 'depositAmount'] as const;
+/** The three Decimal columns living directly on Service. Kept in one place so
+ *  a new money field cannot be added to the model and forgotten here.
+ *  `ServicePackage.price` is a Decimal too, serialised separately below since
+ *  it lives on the nested relation, not on Service itself. */
+const MONEY_FIELDS = ['singlePrice', 'evaluationCost', 'depositAmount'] as const;
 
 type MoneyField = (typeof MONEY_FIELDS)[number];
+
+export type SerializedServicePackage = Omit<ServicePackage, 'price'> & { price: string };
 
 /** Service as it goes over the wire: money as fixed 2-decimal strings. */
 export type SerializedService = Omit<Service, MoneyField> & {
   singlePrice: string;
-  packagePrice: string | null;
   evaluationCost: string | null;
   depositAmount: string | null;
+  packages: SerializedServicePackage[];
 };
 
 export type SerializedServiceWithCategory = SerializedService & {
@@ -36,20 +40,24 @@ function toMoney(value: Prisma.Decimal | null): string | null {
   return value === null ? null : value.toFixed(2);
 }
 
-export function serializeService<T extends Service>(
+function serializePackage(pkg: ServicePackage): SerializedServicePackage {
+  return { ...pkg, price: pkg.price.toFixed(2) };
+}
+
+export function serializeService<T extends Service & { packages: ServicePackage[] }>(
   service: T,
-): Omit<T, MoneyField> & SerializedService {
+): Omit<T, MoneyField | 'packages'> & SerializedService {
   return {
     ...service,
     singlePrice: service.singlePrice.toFixed(2),
-    packagePrice: toMoney(service.packagePrice),
     evaluationCost: toMoney(service.evaluationCost),
     depositAmount: toMoney(service.depositAmount),
+    packages: service.packages.map(serializePackage),
   };
 }
 
-export function serializeServices<T extends Service>(
+export function serializeServices<T extends Service & { packages: ServicePackage[] }>(
   services: T[],
-): Array<Omit<T, MoneyField> & SerializedService> {
+): Array<Omit<T, MoneyField | 'packages'> & SerializedService> {
   return services.map(serializeService);
 }

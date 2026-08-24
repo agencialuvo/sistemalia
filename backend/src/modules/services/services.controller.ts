@@ -179,6 +179,13 @@ export class ServicesController {
     return this.services.deactivate(tenantId, id);
   }
 
+  /** Genuine hard delete — see ServicesService.removePermanently for the
+   *  cascade/nullify consequences the frontend must warn about first. */
+  @Delete(':id/permanent')
+  removePermanently(@TenantId() tenantId: string, @Param('id', uuidParam) id: string) {
+    return this.services.removePermanently(tenantId, id);
+  }
+
   /**
    * Query-string flags arrive as text. Boolean("false") is `true`, so the
    * literals are matched explicitly and anything else is rejected instead of

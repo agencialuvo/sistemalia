@@ -1,9 +1,10 @@
 "use client";
 
+import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useAuth } from "@/hooks/use-auth";
-import { LogOut, Menu, Settings as SettingsIcon, User } from "lucide-react";
+import { ChevronDown, LogOut, Menu, Settings as SettingsIcon, User } from "lucide-react";
 import {
   Avatar,
   AvatarFallback,
@@ -17,6 +18,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ModeToggle } from "@/components/layout/mode-toggle";
+import { SignOutConfirmDialog } from "@/components/layout/sign-out-confirm-dialog";
 
 const pageTitles: Record<string, string> = {
   "/panel": "dashboard",
@@ -48,8 +50,9 @@ import { useTranslations } from "next-intl";
 export function Header({ onOpenSidebar }: HeaderProps) {
   const t = useTranslations("Header");
   const pathname = usePathname();
-  const { profile, signOut } = useAuth();
+  const { profile } = useAuth();
   const titleKey = getPageTitleKey(pathname);
+  const [signOutConfirmOpen, setSignOutConfirmOpen] = useState(false);
 
   const initial =
     profile?.full_name?.charAt(0)?.toUpperCase() ??
@@ -95,6 +98,9 @@ export function Header({ onOpenSidebar }: HeaderProps) {
           <span className="hidden text-sm font-medium text-foreground sm:inline">
             {profile?.full_name ?? t("defaultUser")}
           </span>
+          {/* Signals the trigger opens a menu — without it the avatar+name
+              read as a static profile chip, not something clickable. */}
+          <ChevronDown className="hidden size-3.5 text-muted-foreground sm:block" />
         </DropdownMenuTrigger>
         <DropdownMenuContent
           align="end"
@@ -134,7 +140,7 @@ export function Header({ onOpenSidebar }: HeaderProps) {
           </DropdownMenuItem>
           <DropdownMenuSeparator className="bg-border" />
           <DropdownMenuItem
-            onClick={signOut}
+            onClick={() => setSignOutConfirmOpen(true)}
             className="text-popover-foreground focus:bg-accent focus:text-accent-foreground"
           >
             <LogOut className="size-4" />
@@ -143,6 +149,8 @@ export function Header({ onOpenSidebar }: HeaderProps) {
         </DropdownMenuContent>
         </DropdownMenu>
       </div>
+
+      <SignOutConfirmDialog open={signOutConfirmOpen} onOpenChange={setSignOutConfirmOpen} />
     </header>
   );
 }

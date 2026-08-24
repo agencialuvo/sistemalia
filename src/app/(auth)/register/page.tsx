@@ -8,6 +8,7 @@ import { useForm } from "react-hook-form";
 import { UserRoundPlus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { PasswordInput } from "@/components/ui/password-input";
 import { Label } from "@/components/ui/label";
 import {
   Card,
@@ -85,7 +86,7 @@ export default function RegisterPage() {
               <Label htmlFor="password" className="text-muted-foreground">
                 Contraseña
               </Label>
-              <Input id="password" type="password" {...register("password")} />
+              <PasswordInput id="password" {...register("password")} />
               {errors.password && (
                 <p className="text-sm text-red-400">{errors.password.message}</p>
               )}

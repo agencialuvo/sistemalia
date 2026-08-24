@@ -82,17 +82,43 @@ export class CategoriesService {
     }
   }
 
+  /** Nombre fijo de la categoría de respaldo (spec ampliación §4): todo
+   *  servicio sin categoría, o cuya categoría se eliminó, debe caer aquí en
+   *  vez de quedar con un categoryId huérfano — la columna es NOT NULL. Es
+   *  un cajón permanente del sistema, nunca uno que el usuario administra: no
+   *  se puede borrar ni vacía, para que siempre haya un destino de reasignación. */
+  private readonly DEFAULT_CATEGORY_NAME = 'Sin categoría';
+
+  /** Busca "Sin categoría" para este tenant y la crea si todavía no existe.
+   *  Aceptar un `tx` permite llamarla dentro de la misma transacción que
+   *  reasigna los servicios en remove(), para que ninguna quede a medias. */
+  private async ensureDefaultCategory(
+    tenantId: string,
+    tx: Prisma.TransactionClient = this.prisma,
+  ) {
+    const existing = await tx.serviceCategory.findFirst({
+      where: { tenantId, name: this.DEFAULT_CATEGORY_NAME },
+    });
+    if (existing) return existing;
+    return tx.serviceCategory.create({
+      data: { tenantId, name: this.DEFAULT_CATEGORY_NAME, color: '#64748B', isActive: true },
+    });
+  }
+
   /**
    * DELETE /services/categories/:id.
    *
-   * A category with services attached is deactivated, never removed: the
-   * appointment history points at those services and spec §2.1 asks for the
-   * logical deletion precisely so it does not break. An empty category — a
-   * typo made a minute ago — is deleted for real, because leaving invisible
-   * dead rows behind is not what the user asked for either.
+   * A category with services attached is not left as a dead reference nor
+   * merely deactivated: its services are reassigned to "Sin categoría"
+   * (created on demand) and the category itself is deleted for real, because
+   * categoryId is NOT NULL and the appointment history reads the service, not
+   * the category name, for its record. An empty category is deleted the same
+   * way it always was.
    *
-   * The response says which of the two happened so the UI can word the toast
-   * correctly instead of claiming "eliminada" when the row is still there.
+   * "Sin categoría" itself can never be deleted, empty or not — it is the
+   * fallback every reassignment relies on, so there is always somewhere to
+   * land. Checked BEFORE the empty-category fast path below, which would
+   * otherwise happily delete it the moment its last service moved elsewhere.
    */
   async remove(tenantId: string, id: string): Promise<CategoryDeletionResult> {
     const category = await this.prisma.serviceCategory.findFirst({
@@ -104,21 +130,33 @@ export class CategoriesService {
       throw new NotFoundException('La categoría no existe o no pertenece a tu centro estético.');
     }
 
-    if (category._count.services > 0) {
-      await this.prisma.serviceCategory.update({
-        where: { id, tenantId },
-        data: { isActive: false },
-      });
-      this.logger.log(`Categoría ${id} desactivada (tiene ${category._count.services} servicios).`);
-      return {
-        id,
-        deleted: false,
-        message: `La categoría se desactivó porque tiene ${category._count.services} servicio(s) asociado(s).`,
-      };
+    if (category.name === this.DEFAULT_CATEGORY_NAME) {
+      throw new ConflictException(`No puedes eliminar la categoría "${this.DEFAULT_CATEGORY_NAME}".`);
     }
 
-    await this.prisma.serviceCategory.delete({ where: { id, tenantId } });
-    return { id, deleted: true, message: 'Categoría eliminada.' };
+    if (category._count.services === 0) {
+      await this.prisma.serviceCategory.delete({ where: { id, tenantId } });
+      return { id, deleted: true, message: 'Categoría eliminada.' };
+    }
+
+    const serviceCount = category._count.services;
+    await this.prisma.$transaction(async (tx) => {
+      const fallback = await this.ensureDefaultCategory(tenantId, tx);
+      await tx.service.updateMany({
+        where: { tenantId, categoryId: id },
+        data: { categoryId: fallback.id },
+      });
+      await tx.serviceCategory.delete({ where: { id, tenantId } });
+    });
+
+    this.logger.log(
+      `Categoría ${id} eliminada; ${serviceCount} servicio(s) reasignado(s) a "${this.DEFAULT_CATEGORY_NAME}".`,
+    );
+    return {
+      id,
+      deleted: true,
+      message: `Categoría eliminada. ${serviceCount} servicio(s) se reasignaron a "${this.DEFAULT_CATEGORY_NAME}".`,
+    };
   }
 
   /**

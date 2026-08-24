@@ -6,6 +6,8 @@ import { toast } from "sonner";
 import { Loader2, Pencil, Plus, Tag, Trash2, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import {
   Dialog,
   DialogContent,
@@ -25,8 +27,13 @@ import {
   removeCategory,
   updateCategory,
 } from "@/lib/services/api";
-import { categorySchema, type ServiceCategory } from "@/lib/validators/service";
+import { DEFAULT_CATEGORY_NAME, categorySchema, type ServiceCategory } from "@/lib/validators/service";
 import { cn } from "@/lib/utils";
+
+/** What ConfirmDeleteDialog is currently guarding here — one row's trash
+ *  icon, or the bulk action bar. `null` means it's closed. Mirrors the
+ *  DeleteTarget pattern in the services page (spec §3). */
+type DeleteTarget = { kind: "single"; category: ServiceCategory } | { kind: "bulk" } | null;
 
 /** Palette offered as swatches. Any #RRGGBB is accepted — these are just the
  *  ones that stay legible against both themes in the calendar. */
@@ -82,7 +89,9 @@ export function CategoryManagerDialog({
   const [draft, setDraft] = useState<DraftCategory | null>(null);
   const [saving, setSaving] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
-  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -100,8 +109,28 @@ export function CategoryManagerDialog({
       void load();
       setDraft(null);
       setErrors({});
+      setSelectedIds(new Set());
     }
   }, [open, load]);
+
+  // "Sin categoría" no se puede borrar (spec: es el cajón de reasignación
+  // permanente), así que ni entra en "Seleccionar todo" ni tiene checkbox propio.
+  const selectableCategories = categories.filter((c) => c.name !== DEFAULT_CATEGORY_NAME);
+  const allSelected =
+    selectableCategories.length > 0 && selectedIds.size === selectableCategories.length;
+
+  function toggleSelectAll(checked: boolean) {
+    setSelectedIds(checked ? new Set(selectableCategories.map((c) => c.id)) : new Set());
+  }
+
+  function toggleSelected(category: ServiceCategory, checked: boolean) {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (checked) next.add(category.id);
+      else next.delete(category.id);
+      return next;
+    });
+  }
 
   function startCreate() {
     setErrors({});
@@ -169,32 +198,45 @@ export function CategoryManagerDialog({
     }
   }
 
-  async function remove(category: ServiceCategory) {
-    const inUse = (category._count?.services ?? 0) > 0;
-    const question = inUse
-      ? t("categories.confirmDeactivate", { count: category._count?.services ?? 0 })
-      : t("categories.confirmDelete", { name: category.name });
-
-    if (!window.confirm(question)) return;
-
-    setDeletingId(category.id);
+  /** Runs once ConfirmDeleteDialog has been accepted — branches on a single
+   *  row's trash icon vs. the bulk action bar, same shape as the services
+   *  page's confirmDelete (spec §3). Services under a deleted category are
+   *  reassigned to "Predeterminado" by the API, never left orphaned. */
+  const confirmDelete = useCallback(async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
     try {
-      // The API decides between deleting and deactivating (a category with
-      // services must survive so appointment history keeps resolving) and says
-      // which it did, so the toast never claims "eliminada" for a row that is
-      // still there.
-      const result = await removeCategory(category.id);
-      toast.success(result.message);
+      if (deleteTarget.kind === "single") {
+        const result = await removeCategory(deleteTarget.category.id);
+        toast.success(result.message);
+        setSelectedIds((current) => {
+          const next = new Set(current);
+          next.delete(deleteTarget.category.id);
+          return next;
+        });
+      } else {
+        const ids = [...selectedIds];
+        const results = await Promise.allSettled(ids.map((id) => removeCategory(id)));
+        const failed = results.filter((r) => r.status === "rejected").length;
+        if (failed > 0) {
+          toast.error(t("categories.bulk.deletePartialFailure", { failed, total: ids.length }));
+        } else {
+          toast.success(t("categories.bulk.deleted", { count: ids.length }));
+        }
+        setSelectedIds(new Set());
+      }
+      setDeleteTarget(null);
       await load();
       onChanged();
     } catch (error) {
       toast.error(getApiErrorMessage(error, t("categories.deleteFailed")));
     } finally {
-      setDeletingId(null);
+      setDeleting(false);
     }
-  }
+  }, [deleteTarget, selectedIds, load, onChanged, t]);
 
   return (
+    <>
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex max-h-[min(90vh,760px)] flex-col gap-0 overflow-hidden p-0 sm:max-w-2xl">
         <DialogHeader className="shrink-0 gap-1.5 border-b border-border/80 px-6 pt-6 pb-5">
@@ -324,59 +366,102 @@ export function CategoryManagerDialog({
               <p className="text-sm text-muted-foreground">{t("categories.empty")}</p>
             </div>
           ) : (
-            <ul className="divide-y divide-border rounded-lg border border-border">
-              {categories.map((category) => (
-                <li key={category.id} className="flex items-center gap-3 p-3">
-                  <span
-                    className="size-4 shrink-0 rounded-full border border-border"
-                    style={{ backgroundColor: category.color ?? "transparent" }}
-                    aria-hidden
-                  />
-                  <div className="min-w-0 flex-1">
-                    <p
-                      className={cn(
-                        "truncate text-sm font-medium",
-                        category.isActive ? "text-foreground" : "text-muted-foreground",
+            <>
+              <label className="mb-2 flex w-fit cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+                <Checkbox
+                  checked={allSelected}
+                  onCheckedChange={(checked) => toggleSelectAll(checked === true)}
+                />
+                {t("categories.selectAll")}
+              </label>
+              <ul className="divide-y divide-border rounded-lg border border-border">
+                {categories.map((category) => {
+                  const isDefault = category.name === DEFAULT_CATEGORY_NAME;
+                  return (
+                    <li key={category.id} className="flex items-center gap-3 p-3">
+                      {isDefault ? (
+                        <span className="size-4 shrink-0" aria-hidden />
+                      ) : (
+                        <Checkbox
+                          checked={selectedIds.has(category.id)}
+                          onCheckedChange={(checked) => toggleSelected(category, checked === true)}
+                          aria-label={t("categories.select")}
+                        />
                       )}
-                    >
-                      {category.name}
-                      {!category.isActive && (
-                        <span className="ml-2 text-xs font-normal text-muted-foreground">
-                          · {t("categories.inactive")}
-                        </span>
+                      <span
+                        className="size-4 shrink-0 rounded-full border border-border"
+                        style={{ backgroundColor: category.color ?? "transparent" }}
+                        aria-hidden
+                      />
+                      <div className="min-w-0 flex-1">
+                        <p
+                          className={cn(
+                            "truncate text-sm font-medium",
+                            category.isActive ? "text-foreground" : "text-muted-foreground",
+                          )}
+                        >
+                          {category.name}
+                          {isDefault && (
+                            <span className="ml-2 text-xs font-normal text-muted-foreground">
+                              · {t("categories.defaultBadge")}
+                            </span>
+                          )}
+                          {!category.isActive && (
+                            <span className="ml-2 text-xs font-normal text-muted-foreground">
+                              · {t("categories.inactive")}
+                            </span>
+                          )}
+                        </p>
+                        <p className="truncate text-xs text-muted-foreground">
+                          {t("categories.serviceCount", { count: category._count?.services ?? 0 })}
+                          {category.description ? ` · ${category.description}` : ""}
+                        </p>
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => startEdit(category)}
+                        aria-label={t("common.edit")}
+                      >
+                        <Pencil className="size-4" />
+                      </Button>
+                      {!isDefault && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => setDeleteTarget({ kind: "single", category })}
+                          aria-label={t("common.delete")}
+                        >
+                          <Trash2 className="size-4 text-destructive" />
+                        </Button>
                       )}
-                    </p>
-                    <p className="truncate text-xs text-muted-foreground">
-                      {t("categories.serviceCount", { count: category._count?.services ?? 0 })}
-                      {category.description ? ` · ${category.description}` : ""}
-                    </p>
-                  </div>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => startEdit(category)}
-                    aria-label={t("common.edit")}
-                  >
-                    <Pencil className="size-4" />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => remove(category)}
-                    disabled={deletingId === category.id}
-                    aria-label={t("common.delete")}
-                  >
-                    {deletingId === category.id ? (
-                      <Loader2 className="size-4 animate-spin" />
-                    ) : (
-                      <Trash2 className="size-4 text-destructive" />
-                    )}
-                  </Button>
-                </li>
-              ))}
-            </ul>
+                    </li>
+                  );
+                })}
+              </ul>
+            </>
           )}
         </div>
+
+        {selectedIds.size > 0 && (
+          <div className="flex shrink-0 items-center gap-3 border-t border-border/80 bg-muted/40 px-6 py-3">
+            <span className="text-sm font-medium text-foreground">
+              {t("categories.bulk.selectedCount", { count: selectedIds.size })}
+            </span>
+            <Button variant="ghost" size="sm" onClick={() => setSelectedIds(new Set())}>
+              {t("categories.bulk.cancelSelection")}
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              className="ml-auto"
+              onClick={() => setDeleteTarget({ kind: "bulk" })}
+            >
+              <Trash2 className="mr-1.5 size-4" />
+              {t("categories.bulk.deleteSelected")}
+            </Button>
+          </div>
+        )}
 
         <DialogFooter className="shrink-0 border-t border-border/80 px-6 py-4">
           <Button variant="outline" onClick={() => onOpenChange(false)}>
@@ -385,5 +470,23 @@ export function CategoryManagerDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+
+    <ConfirmDeleteDialog
+      open={deleteTarget !== null}
+      onOpenChange={(nextOpen) => !nextOpen && setDeleteTarget(null)}
+      loading={deleting}
+      onConfirm={() => void confirmDelete()}
+      title={
+        deleteTarget?.kind === "single"
+          ? t("categories.deleteConfirmTitle", { name: deleteTarget.category.name })
+          : t("categories.bulk.deleteConfirmTitle", { count: selectedIds.size })
+      }
+      description={
+        deleteTarget?.kind === "single"
+          ? t("categories.deleteConfirmDescription")
+          : t("categories.bulk.deleteConfirmDescription")
+      }
+    />
+    </>
   );
 }

@@ -16,6 +16,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { CategoriesService } from './categories.service';
 import { CreateServiceDto } from './dto/create-service.dto';
 import { QueryServicesDto } from './dto/query-services.dto';
+import { ServicePackageDto } from './dto/service-package.dto';
 import { UpdateServiceDto } from './dto/update-service.dto';
 import { ExcelImportService, ImportError, ParseResult } from './excel-import.service';
 import {
@@ -26,11 +27,22 @@ import {
 
 const RECORD_NOT_FOUND = 'P2025';
 
+/** Matches the default the frontend's page-size selector starts on. */
+const DEFAULT_SERVICE_PAGE_SIZE = 12;
+
 /** Shape the write helpers work on: the stored row merged with the incoming
  *  patch, i.e. what the service WILL look like once saved. */
 type EffectiveService = Omit<CreateServiceDto, 'customSchedule'> & {
   customSchedule?: Record<string, unknown> | Prisma.JsonValue | null;
 };
+
+/** Shared `include` for every read (and every write's response) — kept in
+ *  one place so a card and a detail view can't quietly drift apart on which
+ *  relations they see. */
+const SERVICE_INCLUDE = {
+  category: { select: { id: true, name: true, color: true } },
+  packages: { orderBy: { sessionCount: Prisma.SortOrder.asc } },
+} satisfies Prisma.ServiceInclude;
 
 export interface ImportResult extends ParseResult {
   /** Rows actually written. 0 on a dry run, even when every row is valid. */
@@ -54,37 +66,56 @@ export class ServicesService {
   // -------------------------------------------------------------------------
 
   async findAll(tenantId: string, query: QueryServicesDto) {
-    const services = await this.prisma.service.findMany({
-      where: {
-        tenantId,
-        ...(query.categoryId ? { categoryId: query.categoryId } : {}),
-        ...(query.isActive === undefined ? {} : { isActive: query.isActive }),
-        ...(query.search
-          ? {
-              OR: [
-                { name: { contains: query.search, mode: Prisma.QueryMode.insensitive } },
-                {
-                  commercialDescription: {
-                    contains: query.search,
-                    mode: Prisma.QueryMode.insensitive,
-                  },
+    // Pagination only kicks in when the caller asks for it. Internal callers
+    // (e.g. the staff module's "which services can this person perform"
+    // picker) want the whole catalogue in one shot, same as before this DTO
+    // grew page/pageSize.
+    const paginated = query.page !== undefined || query.pageSize !== undefined;
+    const page = query.page ?? 1;
+    const pageSize = query.pageSize ?? DEFAULT_SERVICE_PAGE_SIZE;
+    const where: Prisma.ServiceWhereInput = {
+      tenantId,
+      ...(query.categoryId ? { categoryId: query.categoryId } : {}),
+      ...(query.isActive === undefined ? {} : { isActive: query.isActive }),
+      ...(query.search
+        ? {
+            OR: [
+              { name: { contains: query.search, mode: Prisma.QueryMode.insensitive } },
+              {
+                commercialDescription: {
+                  contains: query.search,
+                  mode: Prisma.QueryMode.insensitive,
                 },
-              ],
-            }
-          : {}),
-      },
-      include: { category: { select: { id: true, name: true, color: true } } },
-      orderBy: [{ isActive: 'desc' }, { name: 'asc' }],
-    });
+              },
+            ],
+          }
+        : {}),
+    };
 
-    return serializeServices(services);
+    const [services, total] = await Promise.all([
+      this.prisma.service.findMany({
+        where,
+        include: SERVICE_INCLUDE,
+        orderBy: [{ isActive: 'desc' }, { name: 'asc' }],
+        ...(paginated ? { skip: (page - 1) * pageSize, take: pageSize } : {}),
+      }),
+      this.prisma.service.count({ where }),
+    ]);
+
+    return {
+      data: serializeServices(services),
+      total,
+      page: paginated ? page : 1,
+      pageSize: paginated ? pageSize : total,
+      totalPages: paginated ? Math.max(1, Math.ceil(total / pageSize)) : 1,
+    };
   }
 
   async findOne(tenantId: string, id: string) {
     const service = await this.prisma.service.findFirst({
       where: { id, tenantId },
       include: {
-        category: { select: { id: true, name: true, color: true } },
+        ...SERVICE_INCLUDE,
         evaluationService: { select: { id: true, name: true } },
       },
     });
@@ -103,8 +134,20 @@ export class ServicesService {
     await this.assertCategoryBelongsToTenant(tenantId, dto.categoryId);
     await this.assertEvaluationServiceIsUsable(tenantId, dto.evaluationServiceId);
 
+    const isPackage = dto.structureType === ServiceStructureType.SESSIONS;
+    if (isPackage && (!dto.packages || dto.packages.length === 0)) {
+      throw new BadRequestException('Un paquete debe indicar al menos un paquete de sesiones.');
+    }
+
     const service = await this.prisma.service.create({
-      data: { tenantId, ...this.buildWritableData(dto) },
+      data: {
+        tenantId,
+        ...this.buildWritableData(dto),
+        ...(isPackage && dto.packages
+          ? { packages: { create: this.packagesWriteInput(dto.packages) } }
+          : {}),
+      },
+      include: SERVICE_INCLUDE,
     });
 
     this.logger.log(`Servicio ${service.id} creado en el centro ${tenantId}.`);
@@ -117,8 +160,13 @@ export class ServicesService {
    * The stored row is loaded and merged with the patch before anything is
    * written, because the conditional rules only make sense on the complete
    * picture: `PATCH { structureType: "SESSIONS" }` on a service that has no
-   * sessionCount has to fail, and the DTO alone cannot see that — it only
-   * knows about the one field it was sent.
+   * paquetes has to fail, and the DTO alone cannot see that — it only knows
+   * about the one field it was sent.
+   *
+   * `packages`, when sent, REPLACES the whole set (delete-then-create) rather
+   * than diffing — same whole-resource convention StaffMembersService uses
+   * for schedules/serviceIds. Omitting it on a PATCH leaves the existing
+   * packages untouched.
    */
   async update(tenantId: string, id: string, dto: UpdateServiceDto): Promise<SerializedService> {
     const current = await this.prisma.service.findFirst({ where: { id, tenantId } });
@@ -135,10 +183,32 @@ export class ServicesService {
       await this.assertEvaluationServiceIsUsable(tenantId, effective.evaluationServiceId, id);
     }
 
+    const isPackage = effective.structureType === ServiceStructureType.SESSIONS;
+    const packagesSent = dto.packages !== undefined;
+    if (isPackage) {
+      if (packagesSent && dto.packages!.length === 0) {
+        throw new BadRequestException('Un paquete debe indicar al menos un paquete de sesiones.');
+      }
+      // Switching SINGLE -> SESSIONS without sending any package leaves
+      // nothing to fall back on — there was no prior package to keep.
+      const hadNoPriorPackages = current.structureType !== ServiceStructureType.SESSIONS;
+      if (!packagesSent && hadNoPriorPackages) {
+        throw new BadRequestException('Un paquete debe indicar al menos un paquete de sesiones.');
+      }
+    }
+
     try {
       const service = await this.prisma.service.update({
         where: { id, tenantId },
-        data: this.buildWritableData(effective),
+        data: {
+          ...this.buildWritableData(effective),
+          ...(!isPackage
+            ? { packages: { deleteMany: {} } }
+            : packagesSent
+              ? { packages: { deleteMany: {}, create: this.packagesWriteInput(dto.packages!) } }
+              : {}),
+        },
+        include: SERVICE_INCLUDE,
       });
       return serializeService(service);
     } catch (error) {
@@ -162,9 +232,37 @@ export class ServicesService {
       const service = await this.prisma.service.update({
         where: { id, tenantId },
         data: { isActive: false },
+        include: SERVICE_INCLUDE,
       });
       this.logger.log(`Servicio ${id} desactivado en el centro ${tenantId}.`);
       return serializeService(service);
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === RECORD_NOT_FOUND) {
+        throw new NotFoundException('El servicio no existe o no pertenece a tu centro estético.');
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * DELETE /services/:id/permanent — genuine hard delete, distinct from
+   * deactivate() above.
+   *
+   * Offered as its own route rather than repurposing DELETE /services/:id,
+   * because the frontend's "Desactivar" action already depends on that route
+   * meaning "soft, reversible". This one is neither: `evaluationServiceId`
+   * (self-relation, onDelete: SetNull) and `StaffService.serviceId`
+   * (onDelete: Cascade) are enforced by Postgres, so a service that other
+   * services point at as their valoración loses that link instead of
+   * blocking the delete, and a professional's competency row for this
+   * service disappears along with it. The frontend is expected to warn
+   * before calling this — there is no undo once it returns.
+   */
+  async removePermanently(tenantId: string, id: string): Promise<{ id: string; deleted: true }> {
+    try {
+      await this.prisma.service.delete({ where: { id, tenantId } });
+      this.logger.log(`Servicio ${id} eliminado permanentemente del centro ${tenantId}.`);
+      return { id, deleted: true };
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === RECORD_NOT_FOUND) {
         throw new NotFoundException('El servicio no existe o no pertenece a tu centro estético.');
@@ -230,7 +328,12 @@ export class ServicesService {
         tx,
       );
 
-      const rows = parsed.data.map((row) => {
+      // One create() per row rather than createMany(): createMany cannot
+      // attach a nested relation (packages) in the same call, and each
+      // imported SESSIONS row carries exactly one (excel-import.service.ts's
+      // applyPackageShape). MAX_IMPORT_ROWS (500) keeps this bounded.
+      let count = 0;
+      for (const row of parsed.data) {
         const categoryId = categoryIds.get(row.categoryName.toLowerCase());
         if (!categoryId) {
           // Unreachable unless resolveByName changes behaviour; loud rather
@@ -239,14 +342,20 @@ export class ServicesService {
             `No se pudo resolver la categoría "${row.categoryName}".`,
           );
         }
-        return {
-          tenantId,
-          ...this.buildWritableData({ ...row.service, categoryId } as CreateServiceDto),
-        };
-      });
-
-      const result = await tx.service.createMany({ data: rows });
-      return result.count;
+        const effective = { ...row.service, categoryId } as CreateServiceDto;
+        const isPackage = effective.structureType === ServiceStructureType.SESSIONS;
+        await tx.service.create({
+          data: {
+            tenantId,
+            ...this.buildWritableData(effective),
+            ...(isPackage && effective.packages
+              ? { packages: { create: this.packagesWriteInput(effective.packages) } }
+              : {}),
+          },
+        });
+        count += 1;
+      }
+      return count;
     });
 
     this.logger.log(
@@ -271,20 +380,15 @@ export class ServicesService {
    * the AI would later read as real.
    */
   private buildWritableData(input: EffectiveService) {
-    const isPackage = input.structureType === ServiceStructureType.SESSIONS;
+    const isCustomSchedule = input.availabilityType === ServiceAvailabilityType.CUSTOM;
     const requiresEvaluation = input.requiresEvaluation === true;
     const isDeductible = requiresEvaluation && input.isEvaluationDeductible === true;
-    const isCustomSchedule = input.availabilityType === ServiceAvailabilityType.CUSTOM;
-    const isDeposit = input.paymentMethod === ServicePaymentMethod.DEPOSIT;
+    const paymentMethods =
+      input.paymentMethods && input.paymentMethods.length > 0
+        ? input.paymentMethods
+        : [ServicePaymentMethod.IN_PERSON];
+    const isDeposit = paymentMethods.includes(ServicePaymentMethod.DEPOSIT);
 
-    if (isPackage) {
-      if (input.sessionCount === undefined || input.sessionCount === null) {
-        throw new BadRequestException('Un paquete debe indicar cuántas sesiones incluye.');
-      }
-      if (input.packagePrice === undefined || input.packagePrice === null) {
-        throw new BadRequestException('Un paquete debe indicar su precio total.');
-      }
-    }
     if (isCustomSchedule && !input.customSchedule) {
       throw new BadRequestException('Define el horario propio del servicio o usa el de la sede.');
     }
@@ -295,15 +399,12 @@ export class ServicesService {
     return {
       categoryId: input.categoryId,
       name: input.name,
-      commercialDescription: input.commercialDescription,
+      commercialDescription: input.commercialDescription ?? '',
       mainImageUrl: input.mainImageUrl ?? null,
       testimonioGallery: input.testimonioGallery ?? [],
 
       structureType: input.structureType,
-      sessionCount: isPackage ? input.sessionCount : null,
-      frequencyDays: isPackage ? (input.frequencyDays ?? null) : null,
       singlePrice: input.singlePrice,
-      packagePrice: isPackage ? input.packagePrice : null,
 
       requiresEvaluation,
       evaluationServiceId: requiresEvaluation ? (input.evaluationServiceId ?? null) : null,
@@ -323,7 +424,7 @@ export class ServicesService {
       contraindications: input.contraindications ?? [],
       prePostCare: input.prePostCare ?? null,
 
-      paymentMethod: input.paymentMethod ?? ServicePaymentMethod.IN_PERSON,
+      paymentMethods,
       depositAmount: isDeposit ? input.depositAmount : null,
       depositIsPercentage: isDeposit ? (input.depositIsPercentage ?? false) : false,
 
@@ -348,16 +449,9 @@ export class ServicesService {
       testimonioGallery: pick('testimonioGallery', current.testimonioGallery) as string[],
 
       structureType: pick('structureType', current.structureType) as ServiceStructureType,
-      sessionCount: pick('sessionCount', current.sessionCount ?? undefined) as number | undefined,
-      frequencyDays: pick('frequencyDays', current.frequencyDays ?? undefined) as
-        | number
-        | undefined,
       // Decimal -> number for the rule checks; Prisma converts it back on write
       // and the 2-decimal cap has already been enforced by the DTO.
       singlePrice: pick('singlePrice', current.singlePrice.toNumber()) as number,
-      packagePrice: pick('packagePrice', current.packagePrice?.toNumber() ?? undefined) as
-        | number
-        | undefined,
 
       requiresEvaluation: pick('requiresEvaluation', current.requiresEvaluation) as boolean,
       evaluationServiceId: pick(
@@ -385,7 +479,7 @@ export class ServicesService {
       contraindications: pick('contraindications', current.contraindications) as string[],
       prePostCare: pick('prePostCare', current.prePostCare ?? undefined) as string | undefined,
 
-      paymentMethod: pick('paymentMethod', current.paymentMethod) as ServicePaymentMethod,
+      paymentMethods: pick('paymentMethods', current.paymentMethods) as ServicePaymentMethod[],
       depositAmount: pick('depositAmount', current.depositAmount?.toNumber() ?? undefined) as
         | number
         | undefined,
@@ -393,6 +487,16 @@ export class ServicesService {
 
       isActive: pick('isActive', current.isActive) as boolean,
     };
+  }
+
+  /** DTO packages -> Prisma nested-create input. Kept in one place so
+   *  create(), update() and importFromExcel() build the exact same shape. */
+  private packagesWriteInput(packages: ServicePackageDto[]) {
+    return packages.map((entry) => ({
+      sessionCount: entry.sessionCount,
+      frequencyDays: entry.frequencyDays ?? null,
+      price: entry.price,
+    }));
   }
 
   /**

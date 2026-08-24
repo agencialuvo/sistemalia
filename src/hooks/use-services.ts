@@ -1,12 +1,19 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { listCategories, listServices, type ServiceFilters } from "@/lib/services/api";
+import {
+  listCategories,
+  listServices,
+  type ServiceFilters,
+  type ServicePageSize,
+} from "@/lib/services/api";
 import type { Service, ServiceCategory } from "@/lib/validators/service";
 
 /** Keystrokes settle before the request goes out. Long enough to skip the
  *  intermediate letters of a word, short enough to still feel live. */
 const SEARCH_DEBOUNCE_MS = 300;
+
+const DEFAULT_PAGE_SIZE: ServicePageSize = 12;
 
 export type StatusFilter = "all" | "active" | "inactive";
 
@@ -23,15 +30,29 @@ export interface CatalogState {
   setCategoryId: (value: string) => void;
   status: StatusFilter;
   setStatus: (value: StatusFilter) => void;
+  page: number;
+  setPage: (value: number) => void;
+  pageSize: ServicePageSize;
+  setPageSize: (value: ServicePageSize) => void;
+  total: number;
+  totalPages: number;
   refresh: () => Promise<void>;
   refreshCategories: () => Promise<void>;
 }
 
-function toFilters(search: string, categoryId: string, status: StatusFilter): ServiceFilters {
+function toFilters(
+  search: string,
+  categoryId: string,
+  status: StatusFilter,
+  page: number,
+  pageSize: ServicePageSize,
+): ServiceFilters {
   return {
     search: search.trim() || undefined,
     categoryId: categoryId || undefined,
     isActive: status === "all" ? undefined : status === "active",
+    page,
+    pageSize,
   };
 }
 
@@ -50,9 +71,33 @@ export function useServicesCatalog(): CatalogState {
   const [initialLoading, setInitialLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const [search, setSearch] = useState("");
-  const [categoryId, setCategoryId] = useState("");
-  const [status, setStatus] = useState<StatusFilter>("all");
+  const [search, setSearchState] = useState("");
+  const [categoryId, setCategoryIdState] = useState("");
+  const [status, setStatusState] = useState<StatusFilter>("all");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSizeState] = useState<ServicePageSize>(DEFAULT_PAGE_SIZE);
+  const [total, setTotal] = useState(0);
+  const [totalPages, setTotalPages] = useState(1);
+
+  // Changing what's being filtered/sized invalidates the current page number
+  // — page 3 of an unfiltered catalogue may not exist once a filter narrows
+  // the result set, so every one of these resets back to page 1.
+  const setSearch = useCallback((value: string) => {
+    setSearchState(value);
+    setPage(1);
+  }, []);
+  const setCategoryId = useCallback((value: string) => {
+    setCategoryIdState(value);
+    setPage(1);
+  }, []);
+  const setStatus = useCallback((value: StatusFilter) => {
+    setStatusState(value);
+    setPage(1);
+  }, []);
+  const setPageSize = useCallback((value: ServicePageSize) => {
+    setPageSizeState(value);
+    setPage(1);
+  }, []);
 
   /**
    * Guards against out-of-order responses. Typing "láser" fires several
@@ -66,9 +111,11 @@ export function useServicesCatalog(): CatalogState {
     const id = ++requestId.current;
     setLoading(true);
     try {
-      const data = await listServices(filters);
+      const result = await listServices(filters);
       if (id !== requestId.current) return;
-      setServices(data);
+      setServices(result.data);
+      setTotal(result.total);
+      setTotalPages(result.totalPages);
       setError(null);
     } catch {
       if (id !== requestId.current) return;
@@ -91,8 +138,11 @@ export function useServicesCatalog(): CatalogState {
   }, []);
 
   const refresh = useCallback(async () => {
-    await Promise.all([load(toFilters(search, categoryId, status)), refreshCategories()]);
-  }, [load, refreshCategories, search, categoryId, status]);
+    await Promise.all([
+      load(toFilters(search, categoryId, status, page, pageSize)),
+      refreshCategories(),
+    ]);
+  }, [load, refreshCategories, search, categoryId, status, page, pageSize]);
 
   useEffect(() => {
     void refreshCategories();
@@ -100,10 +150,10 @@ export function useServicesCatalog(): CatalogState {
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      void load(toFilters(search, categoryId, status));
+      void load(toFilters(search, categoryId, status, page, pageSize));
     }, SEARCH_DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [load, search, categoryId, status]);
+  }, [load, search, categoryId, status, page, pageSize]);
 
   return {
     services,
@@ -117,6 +167,12 @@ export function useServicesCatalog(): CatalogState {
     setCategoryId,
     status,
     setStatus,
+    page,
+    setPage,
+    pageSize,
+    setPageSize,
+    total,
+    totalPages,
     refresh,
     refreshCategories,
   };

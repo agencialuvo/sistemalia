@@ -1,12 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import Image from "next/image";
-import { useForm, Controller, type Resolver } from "react-hook-form";
+import { useForm, useFieldArray, Controller, type Resolver } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useTranslations } from "next-intl";
 import { toast } from "sonner";
-import { ImagePlus, Loader2, Plus, X } from "lucide-react";
+import { ImagePlus, Loader2, Plus, Trash2, X } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -32,26 +32,75 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { getApiErrorMessage } from "@/lib/api";
-import { createService, updateService, uploadServiceImage } from "@/lib/services/api";
+import { createCategory, createService, updateService, uploadServiceImage } from "@/lib/services/api";
 import {
   COMMON_CONTRAINDICATIONS,
   EMPTY_SERVICE_FORM,
+  EMPTY_SERVICE_PACKAGE,
   MAX_CONTRAINDICATIONS,
   MAX_CONTRAINDICATION_LENGTH,
   MAX_GALLERY_IMAGES,
+  MAX_SESSIONS,
   SERVICE_PAYMENT_METHODS,
+  minutesToTimeString,
   serviceSchema,
+  timeStringToMinutes,
   toServiceForm,
   toServicePayload,
   type Service,
   type ServiceCategory,
   type ServiceFormInput,
+  type ServicePaymentMethod,
 } from "@/lib/validators/service";
 import { cn } from "@/lib/utils";
 
 type TabKey = "identity" | "pricing" | "evaluation" | "timing" | "payment";
 
 const TAB_ORDER: TabKey[] = ["identity", "pricing", "evaluation", "timing", "payment"];
+
+/** Sentinel Select item that switches Tab 1 into "crear categoría on-the-fly"
+ *  mode (spec: "+ Crear nueva categoría"). Never a real categoryId, so it
+ *  can't collide with a UUID. */
+const NEW_CATEGORY_SENTINEL = "__new_category__";
+
+/** Same palette CategoryManagerDialog offers — a category created inline
+ *  here should look the same as one created from its own dialog. */
+const CATEGORY_COLOR_PRESETS = [
+  "#E11D48",
+  "#F97316",
+  "#F59E0B",
+  "#10B981",
+  "#06B6D4",
+  "#3B82F6",
+  "#7C3AED",
+  "#EC4899",
+  "#64748B",
+];
+
+/** Fields validated (via `trigger`) before "Siguiente" is allowed to advance
+ *  past that step — same grouping as FIELD_TAB below, kept separate because
+ *  this one is keyed by tab instead of by field. */
+const TAB_FIELDS: Record<TabKey, (keyof ServiceFormInput)[]> = {
+  identity: [
+    "name",
+    "categoryId",
+    "newCategory",
+    "newCategoryName",
+    "commercialDescription",
+    "mainImageUrl",
+    "testimonioGallery",
+  ],
+  pricing: ["structureType", "singlePrice", "packages"],
+  evaluation: [
+    "requiresEvaluation",
+    "evaluationServiceId",
+    "evaluationCost",
+    "isEvaluationDeductible",
+    "deductibleExpirationDays",
+  ],
+  timing: ["durationMinutes", "bufferMinutes", "contraindications", "prePostCare"],
+  payment: ["paymentMethods", "depositAmount", "depositIsPercentage"],
+};
 
 /**
  * Which tab holds which field.
@@ -64,14 +113,15 @@ const TAB_ORDER: TabKey[] = ["identity", "pricing", "evaluation", "timing", "pay
 const FIELD_TAB: Record<string, TabKey> = {
   name: "identity",
   categoryId: "identity",
+  newCategory: "identity",
+  newCategoryName: "identity",
+  newCategoryColor: "identity",
   commercialDescription: "identity",
   mainImageUrl: "identity",
   testimonioGallery: "identity",
   structureType: "pricing",
-  sessionCount: "pricing",
-  frequencyDays: "pricing",
   singlePrice: "pricing",
-  packagePrice: "pricing",
+  packages: "pricing",
   requiresEvaluation: "evaluation",
   evaluationServiceId: "evaluation",
   evaluationCost: "evaluation",
@@ -81,7 +131,7 @@ const FIELD_TAB: Record<string, TabKey> = {
   bufferMinutes: "timing",
   contraindications: "timing",
   prePostCare: "timing",
-  paymentMethod: "payment",
+  paymentMethods: "payment",
   depositAmount: "payment",
   depositIsPercentage: "payment",
 };
@@ -114,20 +164,34 @@ export function ServiceFormDialog({
     reset,
     watch,
     setValue,
+    trigger,
     formState: { errors },
   } = useForm<ServiceFormInput>({
     resolver: zodResolver(serviceSchema) as Resolver<ServiceFormInput>,
     defaultValues: EMPTY_SERVICE_FORM,
   });
 
+  /** Dynamic "un mismo servicio puede vender varios paquetes" list (spec
+   *  ampliación). useFieldArray, not the manual watch/setValue TagPicker
+   *  pattern used elsewhere in this file, because each row here has THREE
+   *  independent sub-fields — a plain array replace on every keystroke would
+   *  fight the inputs' focus. */
+  const {
+    fields: packageFields,
+    append: appendPackage,
+    remove: removePackage,
+  } = useFieldArray({ control, name: "packages" });
+
   const structureType = watch("structureType");
   const requiresEvaluation = watch("requiresEvaluation");
+  const evaluationServiceId = watch("evaluationServiceId");
   const isDeductible = watch("isEvaluationDeductible");
-  const paymentMethod = watch("paymentMethod");
   const depositIsPercentage = watch("depositIsPercentage");
   const mainImageUrl = watch("mainImageUrl");
   const gallery = watch("testimonioGallery") ?? [];
   const contraindications = watch("contraindications") ?? [];
+  const newCategory = watch("newCategory");
+  const newCategoryColor = watch("newCategoryColor");
 
   useEffect(() => {
     if (!open) return;
@@ -149,7 +213,19 @@ export function ServiceFormDialog({
     async (values: ServiceFormInput) => {
       setSubmitting(true);
       try {
-        const payload = toServicePayload(values);
+        // "+ Crear nueva categoría" (spec §3): the category has to exist
+        // before the service can point at it, so it's created first and its
+        // id substituted in — toServicePayload never talks to the API itself.
+        let categoryId = values.categoryId;
+        if (values.newCategory) {
+          const created = await createCategory({
+            name: values.newCategoryName!.trim(),
+            color: values.newCategoryColor || undefined,
+          });
+          categoryId = created.id;
+        }
+
+        const payload = toServicePayload({ ...values, categoryId });
         if (service) {
           await updateService(service.id, payload);
           toast.success(t("form.updated"));
@@ -158,6 +234,8 @@ export function ServiceFormDialog({
           toast.success(t("form.created"));
         }
         onOpenChange(false);
+        // Refreshes both services AND categories (useServicesCatalog.refresh),
+        // so a category created here shows up in the filter immediately.
         onSaved();
       } catch (error) {
         toast.error(getApiErrorMessage(error, t("form.saveFailed")));
@@ -177,6 +255,20 @@ export function ServiceFormDialog({
     },
     [t],
   );
+
+  /** "Siguiente" (spec §2): validates only the current step's fields before
+   *  advancing, so a stray typo on Tab 4 can't silently block Tab 1. */
+  const goNext = useCallback(async () => {
+    const valid = await trigger(TAB_FIELDS[tab]);
+    if (!valid) return;
+    const index = TAB_ORDER.indexOf(tab);
+    if (index < TAB_ORDER.length - 1) setTab(TAB_ORDER[index + 1]);
+  }, [tab, trigger]);
+
+  const goPrev = useCallback(() => {
+    const index = TAB_ORDER.indexOf(tab);
+    if (index > 0) setTab(TAB_ORDER[index - 1]);
+  }, [tab]);
 
   const evaluationCandidates = services.filter(
     (candidate) => candidate.id !== service?.id && candidate.isActive,
@@ -228,34 +320,112 @@ export function ServiceFormDialog({
 
                 <div>
                   <Label htmlFor="service-category">{t("form.categoryLabel")}</Label>
-                  <Controller
-                    control={control}
-                    name="categoryId"
-                    render={({ field }) => (
-                      <Select value={field.value || undefined} onValueChange={(value) => field.onChange(value ?? "")}>
-                        <SelectTrigger id="service-category" className="mt-1.5 w-full">
-                          <SelectValue placeholder={t("form.categoryPlaceholder")} />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {categories
-                            .filter((category) => category.isActive)
-                            .map((category) => (
-                              <SelectItem key={category.id} value={category.id}>
-                                <span className="flex items-center gap-2">
-                                  <span
-                                    className="size-2.5 rounded-full"
-                                    style={{ backgroundColor: category.color ?? "transparent" }}
-                                  />
-                                  {category.name}
-                                </span>
-                              </SelectItem>
-                            ))}
-                        </SelectContent>
-                      </Select>
-                    )}
-                  />
+                  {!newCategory ? (
+                    <Controller
+                      control={control}
+                      name="categoryId"
+                      render={({ field }) => (
+                        <Select
+                          value={field.value || undefined}
+                          onValueChange={(value) => {
+                            if (value === NEW_CATEGORY_SENTINEL) {
+                              setValue("newCategory", true);
+                              field.onChange("");
+                              return;
+                            }
+                            field.onChange(value ?? "");
+                          }}
+                        >
+                          <SelectTrigger id="service-category" className="mt-1.5 w-full">
+                            {/* Base UI's Select.Value falls back to the raw
+                                value (the category id) unless it is told how
+                                to resolve a label itself. */}
+                            <SelectValue placeholder={t("form.categoryPlaceholder")}>
+                              {(value: string | null) =>
+                                categories.find((category) => category.id === value)?.name ??
+                                t("form.categoryPlaceholder")
+                              }
+                            </SelectValue>
+                          </SelectTrigger>
+                          <SelectContent>
+                            {categories
+                              .filter((category) => category.isActive)
+                              .map((category) => (
+                                <SelectItem key={category.id} value={category.id}>
+                                  <span className="flex items-center gap-2">
+                                    <span
+                                      className="size-2.5 rounded-full"
+                                      style={{ backgroundColor: category.color ?? "transparent" }}
+                                    />
+                                    {category.name}
+                                  </span>
+                                </SelectItem>
+                              ))}
+                            <SelectItem value={NEW_CATEGORY_SENTINEL}>
+                              <span className="flex items-center gap-2 font-medium text-primary">
+                                <Plus className="size-3.5" />
+                                {t("form.category.createNew")}
+                              </span>
+                            </SelectItem>
+                          </SelectContent>
+                        </Select>
+                      )}
+                    />
+                  ) : (
+                    <div className="mt-1.5 space-y-3 rounded-lg border border-dashed border-primary/40 bg-primary/5 p-3">
+                      <div className="flex items-center justify-between">
+                        <p className="text-xs font-medium text-primary">
+                          {t("form.category.creatingNew")}
+                        </p>
+                        <button
+                          type="button"
+                          className="text-xs text-muted-foreground underline hover:text-foreground"
+                          onClick={() => {
+                            setValue("newCategory", false);
+                            setValue("newCategoryName", "");
+                            setValue("newCategoryColor", "");
+                          }}
+                        >
+                          {t("form.category.cancelNew")}
+                        </button>
+                      </div>
+                      <div>
+                        <Label htmlFor="new-category-name">
+                          {t("form.category.newNameLabel")}
+                        </Label>
+                        <Input
+                          id="new-category-name"
+                          {...register("newCategoryName")}
+                          placeholder={t("form.category.newNamePlaceholder")}
+                          className="mt-1.5"
+                          autoFocus
+                        />
+                        <FieldError message={errors.newCategoryName?.message} />
+                      </div>
+                      <div>
+                        <Label>{t("form.category.newColorLabel")}</Label>
+                        <div className="mt-2 flex flex-wrap items-center gap-2">
+                          {CATEGORY_COLOR_PRESETS.map((color) => (
+                            <button
+                              key={color}
+                              type="button"
+                              onClick={() => setValue("newCategoryColor", color)}
+                              aria-label={color}
+                              className={cn(
+                                "size-6 rounded-full border-2 transition-transform",
+                                (newCategoryColor || "").toUpperCase() === color.toUpperCase()
+                                  ? "scale-110 border-foreground"
+                                  : "border-transparent hover:scale-105",
+                              )}
+                              style={{ backgroundColor: color }}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
                   <FieldError message={errors.categoryId?.message} />
-                  {categories.length === 0 && (
+                  {categories.length === 0 && !newCategory && (
                     <p className="mt-1 text-xs text-muted-foreground">
                       {t("form.noCategoriesHint")}
                     </p>
@@ -312,7 +482,15 @@ export function ServiceFormDialog({
                         <button
                           key={option}
                           type="button"
-                          onClick={() => field.onChange(option)}
+                          onClick={() => {
+                            field.onChange(option);
+                            // Selecting SESSIONS with nothing configured yet
+                            // starts the user with one row to fill instead of
+                            // an empty list plus a button.
+                            if (option === "SESSIONS" && packageFields.length === 0) {
+                              appendPackage({ ...EMPTY_SERVICE_PACKAGE });
+                            }
+                          }}
                           className={cn(
                             "rounded-lg border p-4 text-left transition-colors",
                             field.value === option
@@ -340,6 +518,9 @@ export function ServiceFormDialog({
                   </Label>
                   <Input
                     id="service-price"
+                    type="number"
+                    step="0.01"
+                    min="0"
                     inputMode="decimal"
                     {...register("singlePrice")}
                     placeholder="0.00"
@@ -349,43 +530,112 @@ export function ServiceFormDialog({
                 </div>
 
                 {structureType === "SESSIONS" && (
-                  <div className="grid gap-4 rounded-lg border border-border bg-muted/30 p-4 sm:grid-cols-3">
-                    <div>
-                      <Label htmlFor="service-sessions">{t("form.sessionCountLabel")}</Label>
-                      <Input
-                        id="service-sessions"
-                        inputMode="numeric"
-                        {...register("sessionCount")}
-                        placeholder="6"
-                        className="mt-1.5"
-                      />
-                      <FieldError message={errors.sessionCount?.message} />
-                    </div>
-                    <div>
-                      <Label htmlFor="service-frequency">{t("form.frequencyLabel")}</Label>
-                      <Input
-                        id="service-frequency"
-                        inputMode="numeric"
-                        {...register("frequencyDays")}
-                        placeholder="30"
-                        className="mt-1.5"
-                      />
-                      <FieldError message={errors.frequencyDays?.message} />
-                    </div>
-                    <div>
-                      <Label htmlFor="service-package">{t("form.packagePriceLabel")}</Label>
-                      <Input
-                        id="service-package"
-                        inputMode="decimal"
-                        {...register("packagePrice")}
-                        placeholder="0.00"
-                        className="mt-1.5"
-                      />
-                      <FieldError message={errors.packagePrice?.message} />
-                    </div>
-                    <p className="text-xs text-muted-foreground sm:col-span-3">
-                      {t("form.frequencyHelp")}
-                    </p>
+                  <div className="space-y-3">
+                    {packageFields.map((packageField, index) => (
+                      <div
+                        key={packageField.id}
+                        className="grid grid-cols-[1fr_1fr_1fr_auto] items-end gap-3 rounded-lg border border-border bg-muted/30 p-4"
+                      >
+                        <div>
+                          <Label htmlFor={`service-package-sessions-${index}`}>
+                            {t("form.sessionCountLabel")}
+                          </Label>
+                          <Controller
+                            control={control}
+                            name={`packages.${index}.sessionCount`}
+                            render={({ field }) => (
+                              <Input
+                                id={`service-package-sessions-${index}`}
+                                type="number"
+                                min={2}
+                                max={MAX_SESSIONS}
+                                step={1}
+                                inputMode="numeric"
+                                value={field.value}
+                                onChange={(event) => field.onChange(event.target.value)}
+                                placeholder="6"
+                                className="mt-1.5"
+                              />
+                            )}
+                          />
+                          <FieldError message={errors.packages?.[index]?.sessionCount?.message} />
+                        </div>
+                        <div>
+                          <Label htmlFor={`service-package-frequency-${index}`}>
+                            {t("form.frequencyLabel")}
+                          </Label>
+                          <Controller
+                            control={control}
+                            name={`packages.${index}.frequencyDays`}
+                            render={({ field }) => (
+                              <Input
+                                id={`service-package-frequency-${index}`}
+                                type="number"
+                                min={0}
+                                max={365}
+                                step={1}
+                                inputMode="numeric"
+                                value={field.value}
+                                onChange={(event) => field.onChange(event.target.value)}
+                                placeholder="30"
+                                className="mt-1.5"
+                              />
+                            )}
+                          />
+                          <FieldError message={errors.packages?.[index]?.frequencyDays?.message} />
+                        </div>
+                        <div>
+                          <Label htmlFor={`service-package-price-${index}`}>
+                            {t("form.packagePriceLabel")}
+                          </Label>
+                          <Controller
+                            control={control}
+                            name={`packages.${index}.price`}
+                            render={({ field }) => (
+                              <Input
+                                id={`service-package-price-${index}`}
+                                // type="number" ya impide letras a nivel de
+                                // navegador; el esquema Zod sigue siendo la
+                                // validación real al enviar.
+                                type="number"
+                                step="0.01"
+                                min="0"
+                                inputMode="decimal"
+                                value={field.value}
+                                onChange={(event) => field.onChange(event.target.value)}
+                                placeholder="0.00"
+                                className="mt-1.5"
+                              />
+                            )}
+                          />
+                          <FieldError message={errors.packages?.[index]?.price?.message} />
+                        </div>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => removePackage(index)}
+                          aria-label={t("form.removePackage")}
+                        >
+                          <Trash2 className="size-4 text-destructive" />
+                        </Button>
+                      </div>
+                    ))}
+
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => appendPackage({ ...EMPTY_SERVICE_PACKAGE })}
+                    >
+                      <Plus className="mr-1.5 size-4" />
+                      {t("form.addPackage")}
+                    </Button>
+
+                    <p className="text-xs text-muted-foreground">{t("form.frequencyHelp")}</p>
+                    {typeof errors.packages?.message === "string" && (
+                      <FieldError message={errors.packages.message} />
+                    )}
                   </div>
                 )}
               </TabsContent>
@@ -426,10 +676,24 @@ export function ServiceFormDialog({
                         render={({ field }) => (
                           <Select
                             value={field.value || undefined}
-                            onValueChange={(value) => field.onChange(value ?? "")}
+                            onValueChange={(value) => {
+                              field.onChange(value ?? "");
+                              // Auto-fill (spec §5): the valoración usually
+                              // costs what that consult service is priced at
+                              // — the user can still overwrite it afterwards.
+                              const picked = evaluationCandidates.find(
+                                (candidate) => candidate.id === value,
+                              );
+                              if (picked) setValue("evaluationCost", picked.singlePrice);
+                            }}
                           >
                             <SelectTrigger id="service-evaluation" className="mt-1.5 w-full">
-                              <SelectValue placeholder={t("form.evaluationServicePlaceholder")} />
+                              <SelectValue placeholder={t("form.evaluationServicePlaceholder")}>
+                                {(value: string | null) =>
+                                  evaluationCandidates.find((candidate) => candidate.id === value)
+                                    ?.name ?? t("form.evaluationServicePlaceholder")
+                                }
+                              </SelectValue>
                             </SelectTrigger>
                             <SelectContent>
                               {evaluationCandidates.map((candidate) => (
@@ -455,13 +719,23 @@ export function ServiceFormDialog({
                       </Label>
                       <Input
                         id="service-evaluation-cost"
+                        type="number"
+                        step="0.01"
+                        min="0"
                         inputMode="decimal"
                         {...register("evaluationCost")}
+                        // Bloqueado en cuanto hay un servicio de valoración
+                        // seleccionado (spec §2): el precio viene de ahí, no
+                        // se edita a mano por separado.
+                        readOnly={!!evaluationServiceId}
+                        aria-readonly={!!evaluationServiceId}
+                        className={cn("mt-1.5", evaluationServiceId && "bg-muted text-muted-foreground")}
                         placeholder="0.00"
-                        className="mt-1.5"
                       />
                       <p className="mt-1 text-xs text-muted-foreground">
-                        {t("form.evaluationCostHelp")}
+                        {evaluationServiceId
+                          ? t("form.evaluationCostLocked")
+                          : t("form.evaluationCostHelp")}
                       </p>
                       <FieldError message={errors.evaluationCost?.message} />
                     </div>
@@ -515,12 +789,20 @@ export function ServiceFormDialog({
                 <div className="grid gap-4 sm:grid-cols-2">
                   <div>
                     <Label htmlFor="service-duration">{t("form.durationLabel")}</Label>
-                    <Input
-                      id="service-duration"
-                      inputMode="numeric"
-                      {...register("durationMinutes")}
-                      placeholder="45"
-                      className="mt-1.5"
+                    <Controller
+                      control={control}
+                      name="durationMinutes"
+                      render={({ field }) => (
+                        <Input
+                          id="service-duration"
+                          type="time"
+                          value={minutesToTimeString(field.value)}
+                          onChange={(event) =>
+                            field.onChange(timeStringToMinutes(event.target.value))
+                          }
+                          className="mt-1.5"
+                        />
+                      )}
                     />
                     <p className="mt-1 text-xs text-muted-foreground">
                       {t("form.durationHelp")}
@@ -529,12 +811,20 @@ export function ServiceFormDialog({
                   </div>
                   <div>
                     <Label htmlFor="service-buffer">{t("form.bufferLabel")}</Label>
-                    <Input
-                      id="service-buffer"
-                      inputMode="numeric"
-                      {...register("bufferMinutes")}
-                      placeholder="10"
-                      className="mt-1.5"
+                    <Controller
+                      control={control}
+                      name="bufferMinutes"
+                      render={({ field }) => (
+                        <Input
+                          id="service-buffer"
+                          type="time"
+                          value={minutesToTimeString(field.value)}
+                          onChange={(event) =>
+                            field.onChange(timeStringToMinutes(event.target.value))
+                          }
+                          className="mt-1.5"
+                        />
+                      )}
                     />
                     <p className="mt-1 text-xs text-muted-foreground">{t("form.bufferHelp")}</p>
                     <FieldError message={errors.bufferMinutes?.message} />
@@ -576,72 +866,102 @@ export function ServiceFormDialog({
 
               {/* ---------------- Tab 5: Cobranza ----------------------------- */}
               <TabsContent value="payment" className="mt-0 space-y-4">
-                <Controller
-                  control={control}
-                  name="paymentMethod"
-                  render={({ field }) => (
-                    <div className="space-y-2">
-                      {SERVICE_PAYMENT_METHODS.map((method) => (
-                        <button
-                          key={method}
-                          type="button"
-                          onClick={() => field.onChange(method)}
-                          className={cn(
-                            "w-full rounded-lg border p-4 text-left transition-colors",
-                            field.value === method
-                              ? "border-primary bg-primary/5"
-                              : "border-border hover:bg-muted/50",
-                          )}
-                        >
-                          <p className="text-sm font-medium text-foreground">
-                            {t(`form.payment.${method}`)}
-                          </p>
-                          <p className="mt-1 text-xs text-muted-foreground">
-                            {t(`form.paymentHelp.${method}`)}
-                          </p>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                />
+                <div>
+                  <Label>{t("form.paymentMethodsLabel")}</Label>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    {t("form.paymentMethodsHelp")}
+                  </p>
+                  <Controller
+                    control={control}
+                    name="paymentMethods"
+                    render={({ field }) => {
+                      const selected: ServicePaymentMethod[] = field.value ?? [];
+                      const toggle = (method: ServicePaymentMethod) => {
+                        field.onChange(
+                          selected.includes(method)
+                            ? selected.filter((item) => item !== method)
+                            : [...selected, method],
+                        );
+                      };
+                      return (
+                        <div className="mt-2 space-y-2">
+                          {SERVICE_PAYMENT_METHODS.map((method) => {
+                            const checked = selected.includes(method);
+                            return (
+                              <Fragment key={method}>
+                                <label
+                                  className={cn(
+                                    "flex cursor-pointer items-start gap-2.5 rounded-lg border p-4 transition-colors",
+                                    checked
+                                      ? "border-primary bg-primary/5"
+                                      : "border-border hover:bg-muted/50",
+                                  )}
+                                >
+                                  <Checkbox
+                                    checked={checked}
+                                    onCheckedChange={() => toggle(method)}
+                                    className="mt-0.5"
+                                  />
+                                  <span>
+                                    <span className="block text-sm font-medium text-foreground">
+                                      {t(`form.payment.${method}`)}
+                                    </span>
+                                    <span className="block text-xs text-muted-foreground">
+                                      {t(`form.paymentHelp.${method}`)}
+                                    </span>
+                                  </span>
+                                </label>
 
-                {paymentMethod === "DEPOSIT" && (
-                  <div className="space-y-4 rounded-lg border border-border bg-muted/30 p-4">
-                    <Controller
-                      control={control}
-                      name="depositIsPercentage"
-                      render={({ field }) => (
-                        <div className="flex items-center gap-2.5">
-                          <Switch
-                            id="deposit-percentage"
-                            checked={field.value}
-                            onCheckedChange={field.onChange}
-                          />
-                          <Label htmlFor="deposit-percentage" className="cursor-pointer">
-                            {field.value
-                              ? t("form.depositAsPercentage")
-                              : t("form.depositAsAmount")}
-                          </Label>
+                                {method === "DEPOSIT" && checked && (
+                                  <div className="space-y-4 rounded-lg border border-border bg-muted/30 p-4">
+                                    <Controller
+                                      control={control}
+                                      name="depositIsPercentage"
+                                      render={({ field: depositField }) => (
+                                        <div className="flex items-center gap-2.5">
+                                          <Switch
+                                            id="deposit-percentage"
+                                            checked={depositField.value}
+                                            onCheckedChange={depositField.onChange}
+                                          />
+                                          <Label htmlFor="deposit-percentage" className="cursor-pointer">
+                                            {depositField.value
+                                              ? t("form.depositAsPercentage")
+                                              : t("form.depositAsAmount")}
+                                          </Label>
+                                        </div>
+                                      )}
+                                    />
+                                    <div>
+                                      <Label htmlFor="service-deposit">
+                                        {depositIsPercentage
+                                          ? t("form.depositPercentageLabel")
+                                          : t("form.depositAmountLabel")}
+                                      </Label>
+                                      <Input
+                                        id="service-deposit"
+                                        type="number"
+                                        step="0.01"
+                                        min="0"
+                                        max={depositIsPercentage ? 100 : undefined}
+                                        inputMode="decimal"
+                                        {...register("depositAmount")}
+                                        placeholder={depositIsPercentage ? "30" : "0.00"}
+                                        className="mt-1.5"
+                                      />
+                                      <FieldError message={errors.depositAmount?.message} />
+                                    </div>
+                                  </div>
+                                )}
+                              </Fragment>
+                            );
+                          })}
                         </div>
-                      )}
-                    />
-                    <div>
-                      <Label htmlFor="service-deposit">
-                        {depositIsPercentage
-                          ? t("form.depositPercentageLabel")
-                          : t("form.depositAmountLabel")}
-                      </Label>
-                      <Input
-                        id="service-deposit"
-                        inputMode="decimal"
-                        {...register("depositAmount")}
-                        placeholder={depositIsPercentage ? "30" : "0.00"}
-                        className="mt-1.5"
-                      />
-                      <FieldError message={errors.depositAmount?.message} />
-                    </div>
-                  </div>
-                )}
+                      );
+                    }}
+                  />
+                  <FieldError message={errors.paymentMethods?.message} />
+                </div>
 
                 <Controller
                   control={control}
@@ -667,10 +987,21 @@ export function ServiceFormDialog({
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
               {t("common.cancel")}
             </Button>
-            <Button type="submit" disabled={submitting}>
-              {submitting && <Loader2 className="mr-1.5 size-4 animate-spin" />}
-              {service ? t("common.saveChanges") : t("form.createButton")}
-            </Button>
+            {tab !== TAB_ORDER[0] && (
+              <Button type="button" variant="outline" onClick={goPrev}>
+                {t("form.previous")}
+              </Button>
+            )}
+            {tab !== TAB_ORDER[TAB_ORDER.length - 1] ? (
+              <Button type="button" onClick={() => void goNext()}>
+                {t("form.next")}
+              </Button>
+            ) : (
+              <Button type="submit" disabled={submitting}>
+                {submitting && <Loader2 className="mr-1.5 size-4 animate-spin" />}
+                {service ? t("common.saveChanges") : t("form.createButton")}
+              </Button>
+            )}
           </DialogFooter>
         </form>
       </DialogContent>

@@ -18,15 +18,31 @@ export interface ServiceFilters {
   categoryId?: string;
   search?: string;
   isActive?: boolean;
+  page?: number;
+  pageSize?: number;
 }
 
-export async function listServices(filters: ServiceFilters = {}): Promise<Service[]> {
+/** Page sizes offered by the catalogue's page-size selector. */
+export const SERVICE_PAGE_SIZES = [12, 24, 48] as const;
+export type ServicePageSize = (typeof SERVICE_PAGE_SIZES)[number];
+
+export interface ServicesPage {
+  data: Service[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+
+export async function listServices(filters: ServiceFilters = {}): Promise<ServicesPage> {
   const params: Record<string, string> = {};
   if (filters.categoryId) params.categoryId = filters.categoryId;
   if (filters.search) params.search = filters.search;
   if (filters.isActive !== undefined) params.isActive = String(filters.isActive);
+  if (filters.page !== undefined) params.page = String(filters.page);
+  if (filters.pageSize !== undefined) params.pageSize = String(filters.pageSize);
 
-  const { data } = await api.get<Service[]>("/services", { params });
+  const { data } = await api.get<ServicesPage>("/services", { params });
   return data;
 }
 
@@ -57,6 +73,16 @@ export async function deactivateService(id: string): Promise<Service> {
 /** Reactivates a previously deactivated service; there is no dedicated route. */
 export async function reactivateService(id: string): Promise<Service> {
   return updateService(id, { isActive: true });
+}
+
+/**
+ * Genuine, irreversible hard delete — distinct from `deactivateService`.
+ * Callers must confirm with the user first; there is no undo once this
+ * resolves (see backend's ServicesService.removePermanently).
+ */
+export async function deleteServicePermanently(id: string): Promise<{ id: string; deleted: true }> {
+  const { data } = await api.delete<{ id: string; deleted: true }>(`/services/${id}/permanent`);
+  return data;
 }
 
 export async function listCategories(): Promise<ServiceCategory[]> {
