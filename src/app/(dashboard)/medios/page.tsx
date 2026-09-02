@@ -7,6 +7,7 @@ import { Images } from "lucide-react";
 
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { MediaCard, MediaCardSkeleton } from "@/components/media/media-card";
+import { MediaPreviewDialog } from "@/components/media/media-preview-dialog";
 import { MediaUploadDropzone } from "@/components/media/media-upload-dropzone";
 import { getApiErrorMessage } from "@/lib/api";
 import { deleteMedia, listMedia } from "@/lib/media/api";
@@ -30,6 +31,7 @@ export default function MediaPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [kindFilter, setKindFilter] = useState<KindFilter>("all");
+  const [previewing, setPreviewing] = useState<MediaAsset | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<MediaAsset | null>(null);
   const [deleting, setDeleting] = useState(false);
 
@@ -121,10 +123,21 @@ export default function MediaPage() {
       ) : (
         <div className="grid gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
           {filtered.map((asset) => (
-            <MediaCard key={asset.id} asset={asset} onDelete={setDeleteTarget} />
+            <MediaCard
+              key={asset.id}
+              asset={asset}
+              onView={setPreviewing}
+              onDelete={setDeleteTarget}
+            />
           ))}
         </div>
       )}
+
+      <MediaPreviewDialog
+        asset={previewing}
+        onOpenChange={(open) => !open && setPreviewing(null)}
+        onDelete={setDeleteTarget}
+      />
 
       <ConfirmDeleteDialog
         open={deleteTarget !== null}

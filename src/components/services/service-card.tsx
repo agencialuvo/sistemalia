@@ -5,6 +5,7 @@ import { useTranslations } from "next-intl";
 import {
   AlertTriangle,
   Clock,
+  Eye,
   ImageIcon,
   Layers,
   MoreVertical,
@@ -34,6 +35,7 @@ export function ServiceCard({
   service,
   onView,
   onEdit,
+  onManageStaff,
   onToggleActive,
   onDelete,
   selected,
@@ -42,9 +44,12 @@ export function ServiceCard({
 }: {
   service: Service;
   /** Opens the read-only preview — fired by clicking anywhere on the card
-   *  that isn't the checkbox or the options menu. */
+   *  that isn't the checkbox or the options menu, and by the menu's "Ver
+   *  Detalle" item. */
   onView: (service: Service) => void;
   onEdit: (service: Service) => void;
+  /** Opens ServiceFormDialog straight on its "Personal Asignado" tab. */
+  onManageStaff: (service: Service) => void;
   onToggleActive: (service: Service) => void;
   /** Opens the hard-delete confirmation (spec §6) — distinct from
    *  onToggleActive, which is the existing soft deactivate/reactivate. */
@@ -138,9 +143,17 @@ export function ServiceCard({
                 <MoreVertical className="size-4" />
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
+                <DropdownMenuItem onClick={() => onView(service)}>
+                  <Eye className="mr-2 size-4" />
+                  {t("card.viewDetail")}
+                </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => onEdit(service)}>
                   <Pencil className="mr-2 size-4" />
                   {t("common.edit")}
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => onManageStaff(service)}>
+                  <Stethoscope className="mr-2 size-4" />
+                  {t("card.manageStaff")}
                 </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => onToggleActive(service)}>
                   <Power className="mr-2 size-4" />

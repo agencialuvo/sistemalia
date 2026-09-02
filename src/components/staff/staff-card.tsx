@@ -24,10 +24,20 @@ import {
 import { DAY_ABBR, DAY_DISPLAY_ORDER, formatCommission, type StaffMember } from "@/lib/validators/staff";
 import { cn } from "@/lib/utils";
 
+/** Cards render in a fixed-width grid column — a long nombre + apellido
+ *  combo (varios nombres compuestos) can still overflow the CSS `truncate`
+ *  ellipsis awkwardly at some breakpoints, so the text itself is capped. */
+const MAX_CARD_NAME_LENGTH = 20;
+
+function truncateName(name: string): string {
+  return name.length > MAX_CARD_NAME_LENGTH ? `${name.slice(0, MAX_CARD_NAME_LENGTH)}...` : name;
+}
+
 export function StaffCard({
   staff,
   onView,
   onEdit,
+  onManageServices,
   onManageAbsences,
   onToggleActive,
   onDelete,
@@ -40,6 +50,10 @@ export function StaffCard({
    *  that isn't the checkbox or the options menu. */
   onView: (staff: StaffMember) => void;
   onEdit: (staff: StaffMember) => void;
+  /** Opens StaffFormDialog straight on its "Servicios habilitados" tab —
+   *  mirrors ServiceCard's onManageStaff, which lands on the equivalent
+   *  "Personal Asignado" tab from the other side of the same relationship. */
+  onManageServices: (staff: StaffMember) => void;
   onManageAbsences: (staff: StaffMember) => void;
   onToggleActive: (staff: StaffMember) => void;
   /** Opens the hard-delete confirmation — distinct from onToggleActive,
@@ -94,7 +108,9 @@ export function StaffCard({
             />
           </div>
           <div className="min-w-0">
-            <h3 className="truncate text-sm font-semibold text-foreground">{fullName}</h3>
+            <h3 className="truncate text-sm font-semibold text-foreground" title={fullName}>
+              {truncateName(fullName)}
+            </h3>
             <p className="truncate text-xs text-muted-foreground">
               {staff.specialty?.name ?? t("card.noSpecialty")}
             </p>
@@ -118,6 +134,10 @@ export function StaffCard({
               <DropdownMenuItem onClick={() => onEdit(staff)}>
                 <Pencil className="mr-2 size-4" />
                 {t("common.edit")}
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => onManageServices(staff)}>
+                <ConciergeBell className="mr-2 size-4" />
+                {t("card.manageServices")}
               </DropdownMenuItem>
               <DropdownMenuItem onClick={() => onManageAbsences(staff)}>
                 <CalendarOff className="mr-2 size-4" />

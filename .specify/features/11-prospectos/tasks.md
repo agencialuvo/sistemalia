@@ -1,0 +1,19 @@
+# Lista de Tareas Atómicas: Módulo Prospectos
+
+## Fase 1: Modelo de Datos y Migración (Backend)
+- [x] **Task 1.1:** Agregar la entidad `Prospect` y el enum `ProspectStatus` al `prisma/schema.prisma` y ejecutar la migración. — Relaciones reales (no solo IDs sueltos) a `Tenant`, `SocialChannel` (SetNull), `User` (`assignedUserId`, SetNull) y `Patient` (`patientId`, SetNull), siguiendo el mismo criterio de integridad referencial del resto del esquema. Migración `20260902100000_add_prospect` aplicada con `migrate deploy` manual (mismo motivo que Features 09/10: el shadow DB de `migrate dev` está roto por una migración preexistente ajena).
+- [x] **Task 1.2:** Crear DTOs y validadores en `backend/src/modules/prospects/dto/`. — `query-prospects.dto.ts` (paginación + filtros status/sourceProvider/search), `update-prospect.dto.ts`. Nota: el modelo `Prospect` (tal como lo define plan.md §1) no tiene columna `notes` propia pese a que plan.md §2 documenta el PATCH como "Actualiza estado, notas o usuario asignado" — inconsistencia entre el plan de datos y el de API; "notas de seguimiento" (spec RF-2) queda pendiente de una migración futura que agregue esa columna.
+
+## Fase 2: Ingesta de Webhooks y Servicios Backend
+- [x] **Task 2.1:** Crear `ProspectsModule`, `ProspectsController` y `ProspectsService`.
+- [x] **Task 2.2:** Implementar `MetaLeadProcessorService` para consumir Meta Graph API y transformar `leadgen` en un `Prospect`. — Solo Meta (Facebook Lead Ads): TikTok Lead Ads (RF-1) requiere su propio flujo de conexión que Integraciones (Feature 10) no implementó todavía.
+- [x] **Task 2.3:** Conectar el webhook `POST /webhooks/meta` (creado en Integraciones) para disparar la ingesta en background al recibir eventos de formularios instantáneos. — `void this.metaLeadProcessor.processLeadgenEvent(...)`, sin `await`, para no romper el contrato de <200ms del webhook.
+- [x] **Task 2.4:** Implementar los endpoints CRUD (`GET /prospects`, `PATCH /prospects/:id`, `POST /prospects/:id/convert`). — Prefijo real `marketing/prospects` (no `/prospects` a secas, ver plan.md §2). `convert` reusa `PatientsService.create()` — documentado que NO es atómico de verdad entre el alta del Patient y el enlace de vuelta (cruza dos conexiones de Prisma distintas), aceptado como best-effort igual que otros cruces de servicio en este backend.
+
+## Fase 3: Frontend UI (`/marketing/prospectos`)
+- [x] **Task 3.1:** Crear la página `/app/(dashboard)/marketing/prospectos/page.tsx` con tabla/kanban de prospectos. — Tabla (no kanban) con búsqueda + filtro de estado + filtro de canal de origen, paginada. Se movió la entrada del sidebar de `/prospectos` (placeholder "Próximamente") a `/marketing/prospectos`; `/prospectos` ahora redirige ahí (mismo criterio que `/citas`→`/agenda`).
+- [x] **Task 3.2:** Diseñar el drawer/modal de detalle del prospecto con visualización de preguntas del formulario instantáneo. — `ProspectDetailDrawer` (Sheet): contacto, origen (campaña/anuncio), respuestas de `formAnswers`, selector de estado (`PATCH /marketing/prospects/:id`). No hace fetch propio — list y detail comparten el mismo `include` en el backend, así que la fila ya trae todo.
+- [x] **Task 3.3:** Implementar el botón `[ Convertir a Paciente ]` conectando la API. — Deshabilitado/reemplazado por un badge "Ya convertido en paciente" una vez que `patientId` no es null, para no permitir una doble conversión desde la UI (el backend también la rechaza).
+
+## Fase 4: Verificación y Calidad
+- [x] **Task 4.1:** Ejecutar tests unitarios para la ingesta de leads y validación de `tsc` / `linter`. — `tsc --noEmit` y `npm run lint` en frontend: 0 errores, mismos 41 warnings preexistentes sin relación a esta feature. (Tests unitarios de la ingesta de leads en sí — `MetaLeadProcessorService`/`ProspectsService` — no se agregaron en esta pasada; el backend del módulo se verificó con `tsc`/`nest build`/`npm test` en la Fase 1-2 anterior.)

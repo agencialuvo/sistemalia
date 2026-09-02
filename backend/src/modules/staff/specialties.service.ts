@@ -34,7 +34,28 @@ export class SpecialtiesService {
 
   constructor(private readonly prisma: PrismaService) {}
 
+  /** Especialidad de sistema que representa "ningún profesional asignado
+   *  todavía"/"sin especialidad definida" (spec ampliación): seleccionable
+   *  como cualquier otra, pero protegida contra borrado en remove() para que
+   *  siempre haya una opción neutra en el selector. A diferencia de
+   *  DEFAULT_CATEGORY_NAME (Servicios) no existe una FK NOT NULL que la
+   *  obligue a existir — `specialtyId` es nullable — así que se garantiza
+   *  aquí, en cada listado, en vez de crearse bajo demanda solo cuando algo
+   *  la necesita. */
+  private readonly DEFAULT_SPECIALTY_NAME = 'Sin especialidad';
+
+  private async ensureDefaultSpecialty(tenantId: string) {
+    const existing = await this.prisma.specialty.findFirst({
+      where: { tenantId, name: this.DEFAULT_SPECIALTY_NAME },
+    });
+    if (existing) return existing;
+    return this.prisma.specialty.create({
+      data: { tenantId, name: this.DEFAULT_SPECIALTY_NAME, isActive: true },
+    });
+  }
+
   async findAll(tenantId: string, isActive?: boolean) {
+    await this.ensureDefaultSpecialty(tenantId);
     return this.prisma.specialty.findMany({
       where: { tenantId, ...(isActive === undefined ? {} : { isActive }) },
       orderBy: { name: 'asc' },
@@ -90,6 +111,10 @@ export class SpecialtiesService {
 
     if (!specialty) {
       throw new NotFoundException('La especialidad no existe o no pertenece a tu centro estético.');
+    }
+
+    if (specialty.name === this.DEFAULT_SPECIALTY_NAME) {
+      throw new ConflictException(`No puedes eliminar la especialidad "${this.DEFAULT_SPECIALTY_NAME}".`);
     }
 
     if (specialty._count.staffMembers > 0) {

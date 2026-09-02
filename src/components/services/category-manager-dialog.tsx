@@ -1,9 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
 import { toast } from "sonner";
-import { Loader2, Pencil, Plus, Tag, Trash2, X } from "lucide-react";
+import { Loader2, Palette, Pencil, Plus, Tag, Trash2, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -92,6 +92,10 @@ export function CategoryManagerDialog({
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget>(null);
   const [deleting, setDeleting] = useState(false);
+  // Selector de color nativo, oculto — el círculo "+" lo dispara con
+  // .click(). No usa estado propio: el color elegido escribe directo en
+  // draft.color, que es la única fuente de verdad para la selección.
+  const customColorInputRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -312,12 +316,44 @@ export function CategoryManagerDialog({
                         style={{ backgroundColor: color }}
                       />
                     ))}
+
+                    {/* El color personalizado sólo se ve aquí como swatch
+                        propio cuando NO coincide con ninguno de los presets
+                        — si coincide, seleccionarlo ya resalta ese preset y
+                        duplicar el círculo sería confuso. */}
+                    {!PRESET_COLORS.some(
+                      (preset) => preset.toUpperCase() === draft.color.toUpperCase(),
+                    ) && (
+                      <button
+                        type="button"
+                        onClick={() => customColorInputRef.current?.click()}
+                        aria-label={draft.color}
+                        title={draft.color}
+                        className="size-7 scale-110 rounded-full border-2 border-foreground"
+                        style={{ backgroundColor: draft.color }}
+                      />
+                    )}
+
+                    {/* Círculo "+" — abre el selector nativo oculto. Al
+                        elegir un color, onChange escribe directo en
+                        draft.color; el swatch de arriba aparece solo en el
+                        siguiente render porque ya no matchea ningún preset. */}
+                    <button
+                      type="button"
+                      onClick={() => customColorInputRef.current?.click()}
+                      aria-label={t("categories.colorCustom")}
+                      title={t("categories.colorCustom")}
+                      className="flex size-7 items-center justify-center rounded-full border-2 border-dashed border-muted-foreground text-muted-foreground transition-transform hover:scale-105 hover:border-foreground hover:text-foreground"
+                    >
+                      <Palette className="size-3.5" />
+                    </button>
                     <input
+                      ref={customColorInputRef}
                       type="color"
                       value={draft.color}
                       onChange={(event) => setDraft({ ...draft, color: event.target.value })}
+                      className="sr-only"
                       aria-label={t("categories.colorCustom")}
-                      className="size-7 cursor-pointer rounded-full border border-border bg-transparent p-0"
                     />
                   </div>
                   {errors.color && (

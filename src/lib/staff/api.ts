@@ -1,10 +1,95 @@
 import { api } from "@/lib/api";
 import type {
+  CommissionType,
   StaffAbsence,
   StaffImportResult,
   StaffMember,
   Specialty,
 } from "@/lib/validators/staff";
+
+// -------------------------------------------------------------------------
+// Matriz de competencias (asignación masiva Doctores <-> Servicios) — Engine
+// de Disponibilidad, inspirado en JetAppointment.
+// -------------------------------------------------------------------------
+
+export interface ServiceMatrixStaffRow {
+  id: string;
+  firstName: string;
+  lastName: string;
+  avatarUrl: string | null;
+  color: string | null;
+  specialty: { id: string; name: string } | null;
+  /** Nivel 3 (default) del Esquema de Comisiones Jerárquico. */
+  defaultCommissionType: CommissionType | null;
+  defaultCommissionValue: string | null;
+}
+
+export interface ServiceMatrixServiceColumn {
+  id: string;
+  name: string;
+  category: { id: string; name: string; color: string | null } | null;
+  /** Nivel 2 (base) del Esquema de Comisiones Jerárquico. */
+  baseCommissionType: CommissionType | null;
+  baseCommissionValue: string | null;
+}
+
+export interface ServiceMatrixAssignment {
+  staffMemberId: string;
+  serviceId: string;
+  customDurationMinutes: number | null;
+  /** Nivel 1 (custom, el más específico) del Esquema de Comisiones
+   *  Jerárquico — `customCommissionValue` es un STRING con dos decimales,
+   *  misma convención que StaffServiceAssignment (validators/staff.ts). */
+  customCommissionType: CommissionType | null;
+  customCommissionValue: string | null;
+}
+
+export interface ServiceMatrixData {
+  staffMembers: ServiceMatrixStaffRow[];
+  services: ServiceMatrixServiceColumn[];
+  assignments: ServiceMatrixAssignment[];
+}
+
+/** GET /staff/services/matrix — pinta la grilla completa de una sola vez. */
+export async function getStaffServiceMatrix(): Promise<ServiceMatrixData> {
+  const { data } = await api.get<ServiceMatrixData>("/staff/services/matrix");
+  return data;
+}
+
+export interface BulkServiceMatrixEntry {
+  staffMemberId: string;
+  serviceId: string;
+  customDurationMinutes?: number;
+  /** Nivel 1 (custom) del Esquema de Comisiones Jerárquico. Both omitted =
+   *  leave whatever commission the pair already had untouched (see
+   *  StaffMembersService.bulkSyncServiceMatrix's doc comment); sending one
+   *  without the other is rejected server-side. */
+  customCommissionType?: CommissionType;
+  customCommissionValue?: number;
+}
+
+export interface BulkServiceMatrixResult {
+  assigned: number;
+  removed: number;
+}
+
+/**
+ * POST /staff/services/bulk-matrix. `serviceIds` is the sync scope — every
+ * service listed there ends up with EXACTLY the assignments present for it
+ * in `assignments`, including none. Callers touching a single service (e.g.
+ * ServiceFormDialog's "Personal Asignado" tab) must pass `serviceIds: [id]`
+ * so the rest of the tenant's matrix is left untouched.
+ */
+export async function bulkSyncServiceMatrix(
+  serviceIds: string[],
+  assignments: BulkServiceMatrixEntry[],
+): Promise<BulkServiceMatrixResult> {
+  const { data } = await api.post<BulkServiceMatrixResult>("/staff/services/bulk-matrix", {
+    serviceIds,
+    assignments,
+  });
+  return data;
+}
 
 /**
  * Thin typed wrapper over the Módulo 04 endpoints.
@@ -127,7 +212,13 @@ export async function listAbsences(staffMemberId: string): Promise<StaffAbsence[
 
 export async function createAbsence(
   staffMemberId: string,
-  payload: { reason: string; startDate: string; endDate: string },
+  payload: {
+    type?: string;
+    reason: string;
+    internalNote?: string;
+    startDate: string;
+    endDate: string;
+  },
 ): Promise<StaffAbsence> {
   const { data } = await api.post<StaffAbsence>(`/staff/${staffMemberId}/absences`, payload);
   return data;

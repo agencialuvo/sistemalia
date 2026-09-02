@@ -14,13 +14,34 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
 import { getApiErrorMessage } from "@/lib/api";
 import { createAbsence, listAbsences, removeAbsence } from "@/lib/staff/api";
-import { absenceSchema, type StaffAbsence, type StaffMember } from "@/lib/validators/staff";
+import {
+  absenceSchema,
+  EXCEPTION_TYPES,
+  type ExceptionType,
+  type StaffAbsence,
+  type StaffMember,
+} from "@/lib/validators/staff";
 
-const EMPTY_DRAFT = { reason: "", startDate: "", endDate: "" };
+const EMPTY_DRAFT = {
+  type: "CUSTOM_OFF" as ExceptionType,
+  reason: "",
+  internalNote: "",
+  startDate: "",
+  endDate: "",
+};
 
 /** "2026-09-01T00:00:00.000Z" -> "1 sept 2026". */
 function formatDate(iso: string): string {
@@ -96,7 +117,9 @@ export function AbsenceDialog({
     setSaving(true);
     try {
       await createAbsence(staff.id, {
+        type: parsed.data.type,
         reason: parsed.data.reason,
+        internalNote: parsed.data.internalNote?.trim() || undefined,
         startDate: new Date(`${parsed.data.startDate}T00:00:00.000Z`).toISOString(),
         endDate: new Date(`${parsed.data.endDate}T00:00:00.000Z`).toISOString(),
       });
@@ -142,6 +165,32 @@ export function AbsenceDialog({
           {draft ? (
             <div className="mb-5 space-y-3 rounded-lg border border-border bg-muted/40 p-4">
               <div>
+                <Label htmlFor="absence-type">{t("absences.typeLabel")}</Label>
+                <Select
+                  value={draft.type}
+                  onValueChange={(value) =>
+                    setDraft({ ...draft, type: (value as ExceptionType | null) ?? "CUSTOM_OFF" })
+                  }
+                >
+                  <SelectTrigger id="absence-type" className="mt-1.5 w-full">
+                    <SelectValue>
+                      {(value: ExceptionType | null) => t(`absences.types.${value ?? "CUSTOM_OFF"}`)}
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    {EXCEPTION_TYPES.map((type) => (
+                      <SelectItem key={type} value={type}>
+                        {t(`absences.types.${type}`)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {t(`absences.typeHelp.${draft.type}`)}
+                </p>
+              </div>
+
+              <div>
                 <Label htmlFor="absence-reason">{t("absences.reasonLabel")}</Label>
                 <Input
                   id="absence-reason"
@@ -183,6 +232,21 @@ export function AbsenceDialog({
                 </div>
               </div>
 
+              <div>
+                <Label htmlFor="absence-internal-note">{t("absences.internalNoteLabel")}</Label>
+                <Textarea
+                  id="absence-internal-note"
+                  value={draft.internalNote}
+                  onChange={(event) => setDraft({ ...draft, internalNote: event.target.value })}
+                  placeholder={t("absences.internalNotePlaceholder")}
+                  rows={2}
+                  className="mt-1.5"
+                />
+                {errors.internalNote && (
+                  <p className="mt-1 text-xs text-destructive">{errors.internalNote}</p>
+                )}
+              </div>
+
               <div className="flex justify-end gap-2 pt-1">
                 <Button variant="outline" size="sm" onClick={() => setDraft(null)}>
                   {t("common.cancel")}
@@ -222,12 +286,20 @@ export function AbsenceDialog({
               {absences.map((absence) => (
                 <li key={absence.id} className="flex items-center gap-3 p-3">
                   <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm font-medium text-foreground">
+                    <p className="flex items-center gap-1.5 truncate text-sm font-medium text-foreground">
                       {absence.reason}
+                      <Badge variant="secondary" className="shrink-0 text-[10px]">
+                        {t(`absences.types.${absence.type}`)}
+                      </Badge>
                     </p>
                     <p className="truncate text-xs text-muted-foreground">
                       {formatDate(absence.startDate)} — {formatDate(absence.endDate)}
                     </p>
+                    {absence.internalNote && (
+                      <p className="truncate text-xs text-muted-foreground/80">
+                        {absence.internalNote}
+                      </p>
+                    )}
                   </div>
                   <Button
                     variant="ghost"

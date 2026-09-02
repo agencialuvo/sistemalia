@@ -2,27 +2,41 @@
 
 import Image from "next/image";
 import { useTranslations } from "next-intl";
-import { FileText, Film, Trash2 } from "lucide-react";
+import { FileText, Film, Music, Trash2 } from "lucide-react";
 
 import { formatFileSize, type MediaAsset } from "@/lib/validators/media";
 
-/** One tile in the media grid. Images and GIFs get a real thumbnail (the
- *  format that most needs one, since "which cat GIF is this" isn't
- *  answerable from a filename); video and PDF get a representative icon —
- *  generating a video poster frame or a PDF thumbnail server-side is a
- *  separate feature, not something this card can do with a plain <img>. */
+/** One tile in the media grid. Images get a real thumbnail; video, audio and
+ *  PDF get a representative icon — generating a video poster frame or a PDF
+ *  thumbnail server-side is a separate feature, not something this card can
+ *  do with a plain <img>. */
 export function MediaCard({
   asset,
+  onView,
   onDelete,
 }: {
   asset: MediaAsset;
+  /** Opens the preview popup — fired by clicking anywhere on the card that
+   *  isn't the delete button. */
+  onView: (asset: MediaAsset) => void;
   onDelete: (asset: MediaAsset) => void;
 }) {
   const t = useTranslations("Media");
-  const isPreviewable = asset.kind === "IMAGE" || asset.kind === "GIF";
+  const isPreviewable = asset.kind === "IMAGE";
 
   return (
-    <div className="group relative flex flex-col overflow-hidden rounded-xl border border-border bg-card">
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={() => onView(asset)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onView(asset);
+        }
+      }}
+      className="group relative flex flex-col overflow-hidden rounded-xl border border-border bg-card text-left transition-shadow hover:shadow-md"
+    >
       <div className="relative flex h-32 w-full items-center justify-center bg-muted">
         {isPreviewable ? (
           <Image
@@ -35,13 +49,18 @@ export function MediaCard({
           />
         ) : asset.kind === "VIDEO" ? (
           <Film className="size-8 text-muted-foreground/50" />
+        ) : asset.kind === "AUDIO" ? (
+          <Music className="size-8 text-muted-foreground/50" />
         ) : (
           <FileText className="size-8 text-muted-foreground/50" />
         )}
 
         <button
           type="button"
-          onClick={() => onDelete(asset)}
+          onClick={(event) => {
+            event.stopPropagation();
+            onDelete(asset);
+          }}
           aria-label={t("card.delete")}
           className="absolute right-1.5 top-1.5 flex size-7 items-center justify-center rounded-full bg-background/90 text-destructive opacity-0 shadow-sm backdrop-blur transition-opacity group-hover:opacity-100"
         >

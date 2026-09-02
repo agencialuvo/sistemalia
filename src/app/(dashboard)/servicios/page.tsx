@@ -7,8 +7,10 @@ import {
   ConciergeBell,
   Download,
   FileUp,
+  Grid3x3,
   Loader2,
   Plus,
+  Power,
   Search,
   Tag,
   Trash2,
@@ -31,7 +33,8 @@ import { CategoryManagerDialog } from "@/components/services/category-manager-di
 import { ExcelImportDialog } from "@/components/services/excel-import-dialog";
 import { ServiceCard } from "@/components/services/service-card";
 import { ServiceDetailDialog } from "@/components/services/service-detail-dialog";
-import { ServiceFormDialog } from "@/components/services/service-form-dialog";
+import { ServiceFormDialog, type TabKey } from "@/components/services/service-form-dialog";
+import { StaffServiceMatrixDialog } from "@/components/staff/staff-service-matrix-dialog";
 import { useServicesCatalog, type StatusFilter } from "@/hooks/use-services";
 import { getApiErrorMessage } from "@/lib/api";
 import {
@@ -42,7 +45,9 @@ import {
   reactivateService,
   SERVICE_PAGE_SIZES,
 } from "@/lib/services/api";
+import { listStaff } from "@/lib/staff/api";
 import { needsEvaluationLink, type Service } from "@/lib/validators/service";
+import type { StaffMember } from "@/lib/validators/staff";
 
 const ALL_CATEGORIES = "__all__";
 const STATUS_OPTIONS: StatusFilter[] = ["all", "active", "inactive"];
@@ -64,16 +69,29 @@ export default function ServicesPage() {
 
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<Service | null>(null);
+  const [formInitialTab, setFormInitialTab] = useState<TabKey>("identity");
   const [categoriesOpen, setCategoriesOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  const [matrixOpen, setMatrixOpen] = useState(false);
   const [togglingId, setTogglingId] = useState<string | null>(null);
   const [downloading, setDownloading] = useState(false);
   const [viewing, setViewing] = useState<Service | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget>(null);
   const [deleting, setDeleting] = useState(false);
+  const [deactivatingBulk, setDeactivatingBulk] = useState(false);
 
   const { services, categories, refresh } = catalog;
+
+  // Módulo 04's directory — needed for Tab "Personal Asignado" (Engine de
+  // Disponibilidad). Fetched once, same rationale as /personal's fetch of
+  // services/categories for its own form.
+  const [staff, setStaff] = useState<StaffMember[]>([]);
+  useEffect(() => {
+    void listStaff({ isActive: true })
+      .then((result) => setStaff(result.data))
+      .catch(() => setStaff([]));
+  }, []);
 
   // The grid is paginated, but "how many services still need an evaluation
   // link" and "which services can serve as one" (the form's valoración
@@ -104,11 +122,21 @@ export default function ServicesPage() {
 
   const openCreate = useCallback(() => {
     setEditing(null);
+    setFormInitialTab("identity");
     setFormOpen(true);
   }, []);
 
   const openEdit = useCallback((service: Service) => {
     setEditing(service);
+    setFormInitialTab("identity");
+    setFormOpen(true);
+  }, []);
+
+  /** ServiceCard's "Personal Asignado" menu item — same edit dialog, just
+   *  landing straight on Tab 6 instead of Tab 1. */
+  const openManageStaff = useCallback((service: Service) => {
+    setEditing(service);
+    setFormInitialTab("staffAssigned");
     setFormOpen(true);
   }, []);
 
@@ -143,6 +171,26 @@ export default function ServicesPage() {
   }, []);
 
   const clearSelection = useCallback(() => setSelectedIds(new Set()), []);
+
+  /** Bulk "Desactivar seleccionados" — soft, no confirmation modal, same as
+   *  the individual card's toggle (mirrors /personal's deactivateSelected). */
+  const deactivateSelected = useCallback(async () => {
+    setDeactivatingBulk(true);
+    try {
+      const ids = [...selectedIds];
+      const results = await Promise.allSettled(ids.map((id) => deactivateService(id)));
+      const failed = results.filter((r) => r.status === "rejected").length;
+      if (failed > 0) {
+        toast.error(t("bulk.deactivatePartialFailure", { failed, total: ids.length }));
+      } else {
+        toast.success(t("bulk.deactivated", { count: ids.length }));
+      }
+      clearSelection();
+      await refreshAll();
+    } finally {
+      setDeactivatingBulk(false);
+    }
+  }, [selectedIds, clearSelection, refreshAll, t]);
 
   /** Runs the actual hard delete once ConfirmDeleteDialog has been accepted —
    *  branches on single-card "Eliminar" vs. the bulk action bar (spec §6). */
@@ -227,6 +275,10 @@ export default function ServicesPage() {
           <Button variant="outline" size="sm" onClick={() => setImportOpen(true)}>
             <FileUp className="mr-1.5 size-4" />
             {t("actions.import")}
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => setMatrixOpen(true)}>
+            <Grid3x3 className="mr-1.5 size-4" />
+            {t("actions.matrix")}
           </Button>
           <Button size="sm" onClick={openCreate}>
             <Plus className="mr-1.5 size-4" />
@@ -352,6 +404,7 @@ export default function ServicesPage() {
                 service={service}
                 onView={setViewing}
                 onEdit={openEdit}
+                onManageStaff={openManageStaff}
                 onToggleActive={(target) => void toggleActive(target)}
                 onDelete={(target) => setDeleteTarget({ kind: "single", service: target })}
                 selected={selectedIds.has(service.id)}
@@ -389,6 +442,19 @@ export default function ServicesPage() {
               {t("bulk.cancelSelection")}
             </Button>
             <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void deactivateSelected()}
+              disabled={deactivatingBulk}
+            >
+              {deactivatingBulk ? (
+                <Loader2 className="mr-1.5 size-4 animate-spin" />
+              ) : (
+                <Power className="mr-1.5 size-4" />
+              )}
+              {t("bulk.deactivateSelected")}
+            </Button>
+            <Button
               variant="destructive"
               size="sm"
               onClick={() => setDeleteTarget({ kind: "bulk" })}
@@ -406,6 +472,8 @@ export default function ServicesPage() {
         service={editing}
         categories={categories}
         services={allServices}
+        staff={staff}
+        initialTab={formInitialTab}
         onSaved={() => void refreshAll()}
       />
       <CategoryManagerDialog
@@ -417,6 +485,12 @@ export default function ServicesPage() {
         open={importOpen}
         onOpenChange={setImportOpen}
         onImported={() => void refreshAll()}
+      />
+      <StaffServiceMatrixDialog
+        open={matrixOpen}
+        onOpenChange={setMatrixOpen}
+        onSaved={() => void refreshAll()}
+        initialPerspective="service"
       />
       <ServiceDetailDialog
         open={viewing !== null}

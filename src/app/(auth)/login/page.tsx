@@ -5,7 +5,6 @@ import { useRouter } from "next/navigation";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useState } from "react";
 import { useForm } from "react-hook-form";
-import { LogIn } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { PasswordInput } from "@/components/ui/password-input";
@@ -49,9 +48,12 @@ export default function LoginPage() {
     <div className="flex min-h-screen items-center justify-center bg-background px-4">
       <Card className="w-full max-w-md border-border bg-card">
         <CardHeader className="items-center text-center">
-          <div className="mb-2 flex h-12 w-12 items-center justify-center rounded-xl bg-primary/10">
-            <LogIn className="h-6 w-6 text-primary" />
-          </div>
+          {/* eslint-disable-next-line @next/next/no-img-element -- local SVG wordmark, next/image's optimizer requires dangerouslyAllowSVG for no benefit here */}
+          <img
+            src="/SISTEMA%20LIA.svg"
+            alt="Sistema LIA"
+            className="mb-3 h-12 w-auto max-w-[220px] sm:h-14"
+          />
           <CardTitle className="text-xl text-foreground">Bienvenido de nuevo</CardTitle>
           <CardDescription className="text-muted-foreground">
             Inicia sesión en tu cuenta de Sistema LIA.

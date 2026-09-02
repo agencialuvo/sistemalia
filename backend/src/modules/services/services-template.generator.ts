@@ -43,6 +43,7 @@ export const PAYMENT_LABELS = {
 } as const;
 export const BOOLEAN_LABELS = { SÍ: true, NO: false } as const;
 export const STATUS_LABELS = { ACTIVO: true, INACTIVO: false } as const;
+export const COMMISSION_LABELS = { PORCENTAJE: 'PERCENTAGE', 'MONTO FIJO': 'FIXED_AMOUNT' } as const;
 
 export const SERVICE_COLUMNS: ColumnDef[] = [
   {
@@ -169,12 +170,20 @@ export const SERVICE_COLUMNS: ColumnDef[] = [
     help: 'Separadas por coma. Ej: EMBARAZO, MARCAPASOS, CÁNCER ACTIVO.',
   },
   {
-    key: 'prePostCare',
-    header: 'Cuidados previos y posteriores',
+    key: 'preCareNotes',
+    header: 'Cuidados previos',
     kind: 'longText',
     required: false,
-    width: 44,
-    help: 'Instrucciones que la IA enviará al paciente antes y después de la cita.',
+    width: 38,
+    help: 'Instrucciones que la IA enviará al paciente ANTES de la cita.',
+  },
+  {
+    key: 'postCareNotes',
+    header: 'Cuidados posteriores',
+    kind: 'longText',
+    required: false,
+    width: 38,
+    help: 'Instrucciones que la IA enviará al paciente DESPUÉS de la cita.',
   },
   {
     key: 'paymentMethod',
@@ -210,6 +219,23 @@ export const SERVICE_COLUMNS: ColumnDef[] = [
     width: 13,
     help: 'ACTIVO (por defecto) o INACTIVO para cargarlo sin publicarlo todavía.',
     options: Object.keys(STATUS_LABELS),
+  },
+  {
+    key: 'baseCommissionType',
+    header: 'Tipo de comisión base',
+    kind: 'enum',
+    required: false,
+    width: 20,
+    help: 'Comisión que gana cualquier profesional por este servicio, salvo que tenga una comisión personalizada o una comisión general por defecto más específica. Déjalo vacío si no aplica.',
+    options: Object.keys(COMMISSION_LABELS),
+  },
+  {
+    key: 'baseCommissionValue',
+    header: 'Valor de comisión base',
+    kind: 'money',
+    required: false,
+    width: 20,
+    help: 'Si el tipo es PORCENTAJE, un número de 0 a 100 (ej. 15). Si es MONTO FIJO, un monto en soles (ej. 20.00). Requiere haber llenado también el tipo.',
   },
 ];
 
@@ -343,48 +369,152 @@ function writeServicesSheet(sheet: Worksheet, categories: string[]): void {
 
   // The example row reads as a hint, not as data to keep.
   sheet.getRow(2).font = { italic: true, color: { argb: 'FF64748B' } };
+
+  applyStructureConditionalFormatting(sheet);
+}
+
+/** Grays out the three columns that only mean something for a SESIONES
+ *  package (N° de sesiones, Días entre sesiones, Precio del paquete) whenever
+ *  the row's Tipo is ÚNICO — a visual cue that filling them is pointless,
+ *  without blocking the cell like a data-validation rule would. */
+function applyStructureConditionalFormatting(sheet: Worksheet): void {
+  const structureColLetter = columnLetter(
+    SERVICE_COLUMNS.findIndex((column) => column.key === 'structureType') + 1,
+  );
+  const lastRow = TEMPLATE_DATA_ROWS + 1;
+
+  for (const key of ['sessionCount', 'frequencyDays', 'packagePrice']) {
+    const colLetter = columnLetter(SERVICE_COLUMNS.findIndex((column) => column.key === key) + 1);
+    sheet.addConditionalFormatting({
+      ref: `${colLetter}2:${colLetter}${lastRow}`,
+      rules: [
+        {
+          type: 'expression',
+          priority: 1,
+          formulae: [`$${structureColLetter}2="ÚNICO"`],
+          style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE2E8F0' } } },
+        },
+      ],
+    });
+  }
+}
+
+/** 1-based column index -> spreadsheet letter (1 -> A, 27 -> AA). */
+function columnLetter(index: number): string {
+  let letter = '';
+  let n = index;
+  while (n > 0) {
+    const remainder = (n - 1) % 26;
+    letter = String.fromCharCode(65 + remainder) + letter;
+    n = Math.floor((n - 1) / 26);
+  }
+  return letter;
+}
+
+/** Friendlier, example-rich text for the reference table below — overrides
+ *  the column's `help` (written primarily as an in-sheet cell tooltip) for
+ *  the columns the spec calls out by name. Columns not listed here fall back
+ *  to `column.help`, so adding a column never leaves the table with a blank
+ *  row. */
+const INSTRUCTION_EXAMPLES: Partial<Record<string, string>> = {
+  name: 'Nombre oficial del tratamiento. Ej: "Botox Tercio Superior".',
+  categoryName: 'Selecciona o escribe la categoría. Ej: "Inyectables". Si no existe, se crea automáticamente.',
+  commercialDescription: 'Resumen visible para el paciente o recepción.',
+  structureType: 'Elige ÚNICO para sesión individual o SESIONES para paquetes.',
+  sessionCount: 'Solo si Tipo es SESIONES. Número de citas del paquete. Ej: 5.',
+  frequencyDays: 'Solo si Tipo es SESIONES. Frecuencia sugerida en días. Ej: 15.',
+  singlePrice: 'Precio de lista individual en Soles. Ej: 250.00.',
+  packagePrice: 'Solo si Tipo es SESIONES. Precio total del paquete. Ej: 1000.00.',
+  durationMinutes: 'Tiempo de atención en agenda en minutos. Ej: 45.',
+  bufferMinutes: 'Buffer post-cita para desinfección/preparación. Ej: 15.',
+  requiresEvaluation: 'Selecciona SÍ o NO.',
+  evaluationCost: 'Monto de la consulta previa si aplica. Ej: 50.00.',
+  isEvaluationDeductible: 'SÍ si el costo de valoración se descuenta del tratamiento.',
+  preCareNotes: 'Indicaciones antes de asistir. Ej: "No tomar aspirina 48h antes".',
+  postCareNotes: 'Indicaciones post-sesión. Ej: "No gesticular ni acostarse en 4h".',
+  paymentMethod: 'Selecciona EN CAJA, ONLINE, ANTICIPO o PAGO COMPLETO.',
+  isActive: 'Selecciona ACTIVO o INACTIVO.',
+};
+
+/** Bold lead-in + plain continuation in a single cell, e.g. "1. Filas y
+ *  Datos: " (bold) followed by the rest of the sentence (regular weight). */
+function leadInText(number: number, lead: string, rest: string) {
+  return {
+    richText: [
+      { font: { bold: true, color: { argb: BRAND } }, text: `${number}. ${lead}: ` },
+      { text: rest },
+    ],
+  };
 }
 
 function writeInstructions(sheet: Worksheet): void {
   sheet.columns = [
-    { key: 'a', width: 34 },
-    { key: 'b', width: 14 },
-    { key: 'c', width: 86 },
+    { key: 'a', width: 8 },
+    { key: 'b', width: 26 },
+    { key: 'c', width: 92 },
   ];
 
   const title = sheet.addRow(['Plantilla de carga masiva de servicios']);
   title.font = { bold: true, size: 16, color: { argb: BRAND } };
   sheet.addRow([]);
 
-  const intro = [
-    'Llena la hoja "Servicios". Una fila por servicio.',
-    'Las columnas marcadas con * son obligatorias; las demás puedes dejarlas vacías.',
-    'No cambies los nombres de las columnas ni borres la fila de encabezados: el sistema las reconoce por su nombre, así que puedes reordenarlas si lo necesitas.',
-    'La fila 2 es un ejemplo. Bórrala o reemplázala con tus datos.',
-    'Los precios van solo con números y punto decimal (199.90). No escribas "S/" ni separadores de miles.',
-    'Si escribes una categoría que aún no existe, se creará automáticamente al importar.',
-    'Antes de guardar nada, el sistema te mostrará una vista previa con los errores fila por fila.',
+  const subtitle = sheet.addRow(['Reglas generales de llenado']);
+  subtitle.font = { bold: true, size: 12, color: { argb: ACCENT } };
+  sheet.addRow([]);
+
+  const rules: Array<[string, string]> = [
+    [
+      'Filas y Datos',
+      'Llena la hoja "Servicios". Registra un servicio por fila. No elimines ni modifiques la fila de encabezados (Fila 1).',
+    ],
+    [
+      'Campos Obligatorios',
+      'Las columnas marcadas con un asterisco (*) son requeridas. Las demás son opcionales.',
+    ],
+    [
+      'Listas Desplegables',
+      'Utiliza los desplegables habilitados en las celdas para columnas como Tipo, ¿Requiere valoración?, Método de pago, Estado, etc.',
+    ],
+    [
+      'Formato de Montos',
+      'Ingresa solo números con hasta 2 decimales (ej. 150.00). No incluyas el símbolo "S/" ni comas de miles.',
+    ],
+    [
+      'Formato Condicional',
+      'Si seleccionas el tipo ÚNICO, las celdas de N° de sesiones, Días entre sesiones y Precio del paquete se tornarán grises automáticamente ya que no aplican.',
+    ],
+    [
+      'Categorías',
+      'Si especificas una categoría que no existe en el sistema, se creará automáticamente durante la importación.',
+    ],
+    [
+      'Cuidados',
+      'Completa de forma independiente Cuidados previos (instrucciones antes de la cita) y Cuidados posteriores (indicaciones post-tratamiento) para optimizar las respuestas automáticas del bot de IA.',
+    ],
   ];
-  for (const line of intro) {
-    const row = sheet.addRow(['', '•', line]);
-    row.getCell(3).alignment = { wrapText: true, vertical: 'top' };
-  }
+  rules.forEach(([lead, rest], index) => {
+    const row = sheet.addRow(['', leadInText(index + 1, lead, rest), '']);
+    row.getCell(2).alignment = { wrapText: true, vertical: 'top' };
+    sheet.mergeCells(row.number, 2, row.number, 3);
+  });
 
   sheet.addRow([]);
-  const header = sheet.addRow(['Columna', '¿Obligatoria?', 'Cómo llenarla']);
-  header.font = { bold: true, color: { argb: 'FFFFFFFF' } };
-  header.eachCell((cell) => {
+  const tableHeader = sheet.addRow(['Columna', '¿Obligatorio?', 'Instrucción / Ejemplo']);
+  tableHeader.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+  tableHeader.eachCell((cell) => {
     cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: BRAND } };
   });
 
   for (const column of SERVICE_COLUMNS) {
-    const row = sheet.addRow([column.header, column.required ? 'Sí' : 'No', column.help]);
+    const label = column.required ? `${column.header} *` : column.header;
+    const instruction = INSTRUCTION_EXAMPLES[column.key] ?? column.help;
+    const row = sheet.addRow([label, column.required ? 'SÍ' : 'OPCIONAL', instruction]);
     row.getCell(1).font = { bold: true };
     row.getCell(2).alignment = { horizontal: 'center' };
     row.getCell(3).alignment = { wrapText: true, vertical: 'top' };
-    if (column.required) {
-      row.getCell(2).font = { bold: true, color: { argb: 'FFB45309' } };
-    }
+    row.getCell(2).font = column.required
+      ? { bold: true, color: { argb: 'FFB45309' } }
+      : { color: { argb: 'FF64748B' } };
   }
 
   sheet.addRow([]);
@@ -404,6 +534,7 @@ function writeLists(sheet: Worksheet, categories: string[]): void {
     { header: 'Método de pago', key: 'payment', width: 18 },
     { header: 'Sí / No', key: 'boolean', width: 12 },
     { header: 'Estado', key: 'status', width: 14 },
+    { header: 'Comisión base', key: 'commission', width: 16 },
   ];
   sheet.getRow(1).font = { bold: true };
 
@@ -413,6 +544,7 @@ function writeLists(sheet: Worksheet, categories: string[]): void {
     Object.keys(PAYMENT_LABELS),
     Object.keys(BOOLEAN_LABELS),
     Object.keys(STATUS_LABELS),
+    Object.keys(COMMISSION_LABELS),
   ];
 
   const depth = Math.max(...columns.map((values) => values.length));

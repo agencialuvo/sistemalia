@@ -1,6 +1,6 @@
 /** Mirrors backend/src/modules/media (menú "Medios"). */
 
-export const MEDIA_KINDS = ["IMAGE", "GIF", "VIDEO", "PDF"] as const;
+export const MEDIA_KINDS = ["IMAGE", "VIDEO", "AUDIO", "PDF"] as const;
 export type MediaKind = (typeof MEDIA_KINDS)[number];
 
 export interface MediaAsset {
@@ -20,11 +20,9 @@ export const ACCEPTED_MEDIA_MIME_TYPES = [
   "image/png",
   "image/jpeg",
   "image/webp",
-  "image/gif",
   "application/pdf",
   "video/mp4",
-  "video/quicktime",
-  "video/webm",
+  "audio/mpeg",
 ] as const;
 
 /** "2.4 MB" — same idea as formatSoles: a small, boring formatter kept next

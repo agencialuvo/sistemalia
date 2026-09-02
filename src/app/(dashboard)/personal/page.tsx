@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import {
   Download,
   FileUp,
+  Grid3x3,
   Loader2,
   Plus,
   Power,
@@ -33,7 +34,8 @@ import { SpecialtyManagerDialog } from "@/components/staff/specialty-manager-dia
 import { StaffCard } from "@/components/staff/staff-card";
 import { StaffDetailDialog } from "@/components/staff/staff-detail-dialog";
 import { StaffExcelImportDialog } from "@/components/staff/staff-excel-import-dialog";
-import { StaffFormDialog } from "@/components/staff/staff-form-dialog";
+import { StaffFormDialog, type TabKey } from "@/components/staff/staff-form-dialog";
+import { StaffServiceMatrixDialog } from "@/components/staff/staff-service-matrix-dialog";
 import { useStaffDirectory, type StaffStatusFilter } from "@/hooks/use-staff";
 import { getApiErrorMessage } from "@/lib/api";
 import {
@@ -68,8 +70,10 @@ export default function PersonalPage() {
 
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<StaffMember | null>(null);
+  const [formInitialTab, setFormInitialTab] = useState<TabKey>("general");
   const [specialtiesOpen, setSpecialtiesOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  const [matrixOpen, setMatrixOpen] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [absencesOpen, setAbsencesOpen] = useState(false);
   const [absenceTarget, setAbsenceTarget] = useState<StaffMember | null>(null);
@@ -99,6 +103,7 @@ export default function PersonalPage() {
 
   const openCreate = useCallback(() => {
     setEditing(null);
+    setFormInitialTab("general");
     setFormOpen(true);
   }, []);
 
@@ -115,6 +120,16 @@ export default function PersonalPage() {
 
   const openEdit = useCallback((member: StaffMember) => {
     setEditing(member);
+    setFormInitialTab("general");
+    setFormOpen(true);
+  }, []);
+
+  /** StaffCard's "Servicios Asignados" menu item — same edit dialog, just
+   *  landing straight on Tab 2 instead of Tab 1 (mirrors /servicios'
+   *  openManageStaff, which does the same for ServiceFormDialog). */
+  const openManageServices = useCallback((member: StaffMember) => {
+    setEditing(member);
+    setFormInitialTab("services");
     setFormOpen(true);
   }, []);
 
@@ -271,6 +286,10 @@ export default function PersonalPage() {
             <FileUp className="mr-1.5 size-4" />
             {t("actions.import")}
           </Button>
+          <Button variant="outline" size="sm" onClick={() => setMatrixOpen(true)}>
+            <Grid3x3 className="mr-1.5 size-4" />
+            {t("actions.matrix")}
+          </Button>
           <Button size="sm" onClick={openCreate}>
             <Plus className="mr-1.5 size-4" />
             {t("actions.new")}
@@ -401,6 +420,7 @@ export default function PersonalPage() {
                 staff={member}
                 onView={(target) => void openDetail(target)}
                 onEdit={openEdit}
+                onManageServices={openManageServices}
                 onManageAbsences={openAbsences}
                 onToggleActive={(target) => void toggleActive(target)}
                 onDelete={(target) => setDeleteTarget({ kind: "single", staff: target })}
@@ -470,6 +490,7 @@ export default function PersonalPage() {
         specialties={specialties}
         services={services}
         categories={categories}
+        initialTab={formInitialTab}
         onSaved={() => void refresh()}
       />
       <SpecialtyManagerDialog
@@ -481,6 +502,11 @@ export default function PersonalPage() {
         open={importOpen}
         onOpenChange={setImportOpen}
         onImported={() => void refresh()}
+      />
+      <StaffServiceMatrixDialog
+        open={matrixOpen}
+        onOpenChange={setMatrixOpen}
+        onSaved={() => void refresh()}
       />
       <AbsenceDialog
         open={absencesOpen}

@@ -1,4 +1,5 @@
 import {
+  CommissionType,
   ServiceAvailabilityType,
   ServicePaymentMethod,
   ServiceStructureType,
@@ -71,7 +72,7 @@ export class CreateServiceDto {
 
   @IsOptional()
   @IsArray({ message: 'La galería debe ser una lista de imágenes.' })
-  @ArrayMaxSize(20, { message: 'La galería admite hasta 20 imágenes.' })
+  @ArrayMaxSize(10, { message: 'La galería admite hasta 10 imágenes.' })
   @IsUrl({ require_tld: false }, { each: true, message: 'La galería contiene una URL inválida.' })
   testimonioGallery?: string[];
 
@@ -215,6 +216,24 @@ export class CreateServiceDto {
   @Max(MAX_PRICE, { message: 'El anticipo supera el máximo permitido.' })
   @IsDepositAmount()
   depositAmount?: number;
+
+  // --- Bloque 6: Comisión base (Esquema de Comisiones Jerárquico) ---
+
+  /** Nivel 2 de 3: comisión que aplica a cualquier profesional que ofrezca
+   *  este servicio, salvo que StaffService.customCommission* (nivel 1) lo
+   *  sobreescriba; en su ausencia cae a StaffMember.defaultCommission*
+   *  (nivel 3). Ambos campos van juntos — ver assertCommissionIsValid
+   *  (common/utils/commission.util.ts). */
+  @IsOptional()
+  @IsEnum(CommissionType, { message: 'El tipo de comisión no es válido.' })
+  baseCommissionType?: CommissionType;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 }, { message: 'El valor de la comisión admite máximo 2 decimales.' })
+  @Min(0, { message: 'El valor de la comisión no puede ser negativo.' })
+  @Max(999_999.99, { message: 'El valor de la comisión supera el máximo permitido.' })
+  baseCommissionValue?: number;
 
   @IsOptional()
   @IsBoolean({ message: 'El estado debe ser activo o inactivo.' })

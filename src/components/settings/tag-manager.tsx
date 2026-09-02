@@ -1,8 +1,8 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
-import { Loader2, Plus, Tag as TagIcon, X } from 'lucide-react';
+import { Loader2, Palette, Plus, Tag as TagIcon, X } from 'lucide-react';
 import { createClient } from '@/lib/supabase/client';
 import { useAuth } from '@/hooks/use-auth';
 import { Button } from '@/components/ui/button';
@@ -55,6 +55,11 @@ export function TagManager() {
   const [deleting, setDeleting] = useState(false);
   const [newTagName, setNewTagName] = useState('');
   const [selectedColor, setSelectedColor] = useState(PRESET_COLORS[3].value);
+  // Same pattern as CategoryManagerDialog's custom color swatch.
+  const customColorInputRef = useRef<HTMLInputElement>(null);
+  const isCustomColor = !PRESET_COLORS.some(
+    (preset) => preset.value.toUpperCase() === selectedColor.toUpperCase(),
+  );
 
   useEffect(() => {
     if (authLoading) return;
@@ -232,6 +237,35 @@ export function TagManager() {
                     title={t(`colors.${color.name}` as Parameters<typeof t>[0])}
                   />
                 ))}
+
+                {isCustomColor && (
+                  <button
+                    type="button"
+                    onClick={() => customColorInputRef.current?.click()}
+                    aria-label={selectedColor}
+                    title={selectedColor}
+                    className="size-6 rounded-md outline outline-2 outline-offset-2 outline-primary"
+                    style={{ backgroundColor: selectedColor }}
+                  />
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => customColorInputRef.current?.click()}
+                  aria-label={t('customColor')}
+                  title={t('customColor')}
+                  className="flex size-6 items-center justify-center rounded-md border border-dashed border-muted-foreground text-muted-foreground transition-transform hover:scale-110 hover:border-foreground hover:text-foreground"
+                >
+                  <Palette className="size-3.5" />
+                </button>
+                <input
+                  ref={customColorInputRef}
+                  type="color"
+                  value={selectedColor}
+                  onChange={(e) => setSelectedColor(e.target.value)}
+                  className="sr-only"
+                  aria-label={t('customColor')}
+                />
               </div>
               <Button
                 variant="outline"

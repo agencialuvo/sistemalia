@@ -22,6 +22,7 @@ import { memoryStorage } from 'multer';
 import { extname } from 'path';
 import { TenantId } from '../../common/decorators/tenant.decorator';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
+import { BulkServiceMatrixDto } from './dto/bulk-service-matrix.dto';
 import { CreateAbsenceDto } from './dto/create-absence.dto';
 import { CreateSpecialtyDto } from './dto/create-specialty.dto';
 import { CreateStaffDto } from './dto/create-staff.dto';
@@ -156,6 +157,22 @@ export class StaffController {
   @UseInterceptors(FileInterceptor('file', staffImportMulterOptions()))
   confirmImport(@TenantId() tenantId: string, @UploadedFile() file: Express.Multer.File) {
     return this.staff.importFromExcel(tenantId, file, false);
+  }
+
+  // -------------------------------------------------------------------------
+  // Matriz de competencias (asignación masiva Doctores <-> Servicios) —
+  // rutas de dos segmentos, no colisionan con /:id de una sola.
+  // -------------------------------------------------------------------------
+
+  @Get('services/matrix')
+  getServiceMatrix(@TenantId() tenantId: string) {
+    return this.staff.getServiceMatrix(tenantId);
+  }
+
+  @Post('services/bulk-matrix')
+  @HttpCode(HttpStatus.OK)
+  bulkSyncServiceMatrix(@TenantId() tenantId: string, @Body() dto: BulkServiceMatrixDto) {
+    return this.staff.bulkSyncServiceMatrix(tenantId, dto);
   }
 
   // -------------------------------------------------------------------------

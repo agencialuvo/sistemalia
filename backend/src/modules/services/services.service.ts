@@ -6,12 +6,14 @@ import {
   UnprocessableEntityException,
 } from '@nestjs/common';
 import {
+  CommissionType,
   Prisma,
   Service,
   ServiceAvailabilityType,
   ServicePaymentMethod,
   ServiceStructureType,
 } from '@prisma/client';
+import { assertCommissionIsValid } from '../../common/utils/commission.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { CategoriesService } from './categories.service';
 import { CreateServiceDto } from './dto/create-service.dto';
@@ -42,6 +44,10 @@ type EffectiveService = Omit<CreateServiceDto, 'customSchedule'> & {
 const SERVICE_INCLUDE = {
   category: { select: { id: true, name: true, color: true } },
   packages: { orderBy: { sessionCount: Prisma.SortOrder.asc } },
+  // Solo el staffMemberId — el nombre del profesional no hace falta para el
+  // checkbox list de "Personal Asignado" (ServiceFormDialog ya tiene la lista
+  // completa de profesionales por separado); ver service.serializer.ts.
+  staffAssignments: { select: { staffMemberId: true } },
 } satisfies Prisma.ServiceInclude;
 
 export interface ImportResult extends ParseResult {
@@ -395,6 +401,10 @@ export class ServicesService {
     if (isDeposit && (input.depositAmount === undefined || input.depositAmount === null)) {
       throw new BadRequestException('Un servicio con anticipo debe indicar el monto a cobrar.');
     }
+    assertCommissionIsValid(
+      { type: input.baseCommissionType, value: input.baseCommissionValue },
+      'La comisión base del servicio',
+    );
 
     return {
       categoryId: input.categoryId,
@@ -427,6 +437,10 @@ export class ServicesService {
       paymentMethods,
       depositAmount: isDeposit ? input.depositAmount : null,
       depositIsPercentage: isDeposit ? (input.depositIsPercentage ?? false) : false,
+
+      // Nivel 2 (base) del Esquema de Comisiones Jerárquico.
+      baseCommissionType: input.baseCommissionType ?? null,
+      baseCommissionValue: input.baseCommissionValue ?? null,
 
       isActive: input.isActive ?? true,
     };
@@ -484,6 +498,14 @@ export class ServicesService {
         | number
         | undefined,
       depositIsPercentage: pick('depositIsPercentage', current.depositIsPercentage) as boolean,
+
+      baseCommissionType: pick('baseCommissionType', current.baseCommissionType ?? undefined) as
+        | CommissionType
+        | undefined,
+      baseCommissionValue: pick(
+        'baseCommissionValue',
+        current.baseCommissionValue?.toNumber() ?? undefined,
+      ) as number | undefined,
 
       isActive: pick('isActive', current.isActive) as boolean,
     };

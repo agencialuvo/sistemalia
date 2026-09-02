@@ -120,18 +120,33 @@ export function StaffDetailDialog({
             ) : (
               DAY_DISPLAY_ORDER.map((dayOfWeek) => {
                 const entry = byDay.get(dayOfWeek);
-                if (!entry) return null;
+                if (!entry || entry.shifts.length === 0) return null;
                 return (
-                  <div key={dayOfWeek} className="flex items-center justify-between gap-4 text-sm">
+                  <div key={dayOfWeek} className="text-sm">
                     <span className="text-muted-foreground">{DAY_LABELS[dayOfWeek]}</span>
-                    <span className="font-medium text-foreground">
-                      {entry.startTime} – {entry.endTime}
-                      {entry.lunchStartTime && entry.lunchEndTime && (
-                        <span className="ml-1.5 text-xs text-muted-foreground">
-                          ({t("form.scheduleLunch")} {entry.lunchStartTime}–{entry.lunchEndTime})
-                        </span>
-                      )}
-                    </span>
+                    <div className="mt-0.5 space-y-0.5">
+                      {entry.shifts.map((shift) => (
+                        <div key={shift.id} className="flex items-center justify-between gap-4">
+                          <span className="font-medium text-foreground">
+                            {shift.startTime} – {shift.endTime}
+                            {shift.service && (
+                              <span className="ml-1.5 text-xs text-muted-foreground">
+                                ({shift.service.name})
+                              </span>
+                            )}
+                            {shift.breaks.length > 0 && (
+                              <span className="ml-1.5 text-xs text-muted-foreground">
+                                (
+                                {shift.breaks
+                                  .map((brk) => `${brk.label ?? t("form.scheduleLunch")} ${brk.startTime}–${brk.endTime}`)
+                                  .join(", ")}
+                                )
+                              </span>
+                            )}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 );
               })
@@ -160,11 +175,21 @@ export function StaffDetailDialog({
               <p className="text-sm text-muted-foreground">{t("detail.noAbsences")}</p>
             ) : (
               activeAbsences.map((absence) => (
-                <div key={absence.id} className="flex items-center justify-between gap-4 text-sm">
-                  <span className="text-foreground">{absence.reason}</span>
-                  <span className="text-muted-foreground">
-                    {formatDate(absence.startDate)} – {formatDate(absence.endDate)}
-                  </span>
+                <div key={absence.id} className="text-sm">
+                  <div className="flex items-center justify-between gap-4">
+                    <span className="flex items-center gap-1.5 text-foreground">
+                      {absence.reason}
+                      <Badge variant="secondary" className="text-[10px]">
+                        {t(`absences.types.${absence.type}`)}
+                      </Badge>
+                    </span>
+                    <span className="text-muted-foreground">
+                      {formatDate(absence.startDate)} – {formatDate(absence.endDate)}
+                    </span>
+                  </div>
+                  {absence.internalNote && (
+                    <p className="mt-0.5 text-xs text-muted-foreground">{absence.internalNote}</p>
+                  )}
                 </div>
               ))
             )}

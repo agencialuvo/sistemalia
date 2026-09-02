@@ -7,7 +7,9 @@ import { STATUS_LABELS } from '../services/services-template.generator';
 import { ImportStaffRowDto } from './dto/import-staff-row.dto';
 import {
   buildStaffTemplate,
+  DOCUMENT_TYPE_LABELS,
   normalizeHeader,
+  SERVICES_WILDCARD_ALL,
   SHEET_STAFF,
   STAFF_COLUMNS,
   StaffColumnDef,
@@ -28,14 +30,25 @@ export interface ParsedStaffRow {
   row: number;
   /** '' = sin especialidad. */
   specialtyName: string;
-  /** Names already checked against the existing service catalogue. */
+  /** Names already checked against the existing service catalogue. Empty
+   *  when `allServicesRequested` is true — the sheet said "TODOS" instead of
+   *  naming them. */
   serviceNames: string[];
+  /** The row wrote the `SERVICES_WILDCARD_ALL` keyword in "Servicios
+   *  habilitados": StaffMembersService.importFromExcel resolves this to every
+   *  active service at write time, inside the same transaction that creates
+   *  the row, rather than here — see ImportStaffRowDto's doc comment. */
+  allServicesRequested: boolean;
   staff: Omit<ImportStaffRowDto, 'specialtyName' | 'serviceNames'>;
 }
 
 export interface StaffParseResult {
   successCount: number;
   errors: StaffImportError[];
+  /** Same shape as `errors`, but non-blocking: the row above still imports.
+   *  Today the only source is "Servicios habilitados" naming a service that
+   *  does not exist — that service is skipped, not the whole professional. */
+  warnings: StaffImportError[];
   data: ParsedStaffRow[];
   /** Especialidades named in the file that the tenant does not have yet. */
   newSpecialtyNames: string[];
@@ -50,8 +63,14 @@ export const MAX_IMPORT_FILE_BYTES = 5 * 1024 * 1024;
 
 const ACCEPTED_EXTENSIONS = ['.xlsx', '.csv'] as const;
 
+/** Same assumption as CreateStaffDto's DEFAULT_PHONE_COUNTRY_CODE. */
+const DEFAULT_PHONE_COUNTRY_CODE = '+51';
+
 const STATUS_INDEX = new Map(
   Object.entries(STATUS_LABELS).map(([label, value]) => [normalizeHeader(label), value]),
+);
+const DOCUMENT_TYPE_INDEX = new Map(
+  Object.entries(DOCUMENT_TYPE_LABELS).map(([label, value]) => [normalizeHeader(label), value]),
 );
 
 const COLUMN_BY_KEY = new Map(STAFF_COLUMNS.map((column) => [column.key, column]));
@@ -83,6 +102,7 @@ export class StaffExcelImportService {
   ): Promise<StaffParseResult> {
     const sheet = await this.readSheet(buffer, options.filename);
     const errors: StaffImportError[] = [];
+    const warnings: StaffImportError[] = [];
     const data: ParsedStaffRow[] = [];
 
     const headerMap = this.mapHeaders(sheet);
@@ -95,6 +115,7 @@ export class StaffExcelImportService {
         totalRows: 0,
         newSpecialtyNames: [],
         data: [],
+        warnings: [],
         errors: missingRequired.map((column) => ({
           row: 1,
           column: column.header,
@@ -157,21 +178,31 @@ export class StaffExcelImportService {
       }
 
       // Servicios habilitados must already exist — the bulk path does not
-      // create them (see ImportStaffRowDto's doc comment).
+      // create them (see ImportStaffRowDto's doc comment). Blank OR the TODOS
+      // wildcard both mean "every active service", sidestepping the name
+      // check entirely; a name that does not match is a WARNING, not a row
+      // error — that one service is skipped, the professional is still
+      // imported with whichever names did match.
       let serviceNames: string[] = [];
+      let allServicesRequested = false;
       if (rowErrors.length === 0) {
         const raw = (candidate.serviceNames as string | undefined) ?? '';
-        serviceNames = raw
-          .split(',')
-          .map((name) => name.trim())
-          .filter(Boolean);
-        const unknown = serviceNames.filter((name) => !knownServiceNames.has(normalizeHeader(name)));
-        if (unknown.length > 0) {
-          rowErrors.push({
-            row: rowNumber,
-            column: COLUMN_BY_KEY.get('serviceNames')?.header ?? 'Servicios habilitados',
-            error: `Estos servicios no existen en tu catálogo: ${unknown.join(', ')}.`,
-          });
+        if (!raw.trim() || normalizeHeader(raw) === normalizeHeader(SERVICES_WILDCARD_ALL)) {
+          allServicesRequested = true;
+        } else {
+          const requested = raw
+            .split(',')
+            .map((name) => name.trim())
+            .filter(Boolean);
+          serviceNames = requested.filter((name) => knownServiceNames.has(normalizeHeader(name)));
+          const unknown = requested.filter((name) => !knownServiceNames.has(normalizeHeader(name)));
+          if (unknown.length > 0) {
+            warnings.push({
+              row: rowNumber,
+              column: COLUMN_BY_KEY.get('serviceNames')?.header ?? 'Servicios habilitados',
+              error: `Estos servicios no existen en tu catálogo y fueron omitidos: ${unknown.join(', ')}.`,
+            });
+          }
         }
       }
 
@@ -196,11 +227,17 @@ export class StaffExcelImportService {
         }
       }
 
-      data.push({ row: rowNumber, specialtyName: trimmedSpecialty, serviceNames, staff });
+      data.push({
+        row: rowNumber,
+        specialtyName: trimmedSpecialty,
+        serviceNames,
+        allServicesRequested,
+        staff,
+      });
     }
 
     this.logger.log(
-      `Importación de personal analizada: ${data.length} fila(s) válida(s), ${errors.length} error(es).`,
+      `Importación de personal analizada: ${data.length} fila(s) válida(s), ${errors.length} error(es), ${warnings.length} advertencia(s).`,
     );
 
     return {
@@ -209,6 +246,7 @@ export class StaffExcelImportService {
       newSpecialtyNames: [...newSpecialties.values()],
       data,
       errors,
+      warnings,
     };
   }
 
@@ -309,7 +347,7 @@ export class StaffExcelImportService {
       switch (column.kind) {
         case 'text':
         case 'category':
-          output[column.key] = raw;
+          output[column.key] = column.key === 'phone' ? this.normalizePhone(raw) : raw;
           break;
 
         case 'money': {
@@ -339,9 +377,26 @@ export class StaffExcelImportService {
     return output;
   }
 
-  private parseEnum(column: StaffColumnDef, raw: string): boolean | undefined {
+  private parseEnum(column: StaffColumnDef, raw: string): boolean | string | undefined {
     if (column.key === 'isActive') return STATUS_INDEX.get(normalizeHeader(raw));
+    if (column.key === 'documentType') return DOCUMENT_TYPE_INDEX.get(normalizeHeader(raw));
     return undefined;
+  }
+
+  /** Same rule as CreateStaffDto's normalizePhone (staff module) — kept
+   *  duplicated (see parseNumber's doc comment above) because ImportStaffRowDto
+   *  applies its inherited @Transform only for DTO validation, not for the
+   *  raw candidate this service actually writes to the database (see
+   *  validateRow below). The sheet only asks for the local number: no "+" ->
+   *  assumed Perú and DEFAULT_PHONE_COUNTRY_CODE is prepended digits-only. */
+  private normalizePhone(raw: string): string {
+    const trimmed = raw.trim();
+    if (!trimmed) return trimmed;
+    if (trimmed.startsWith('+')) {
+      return `+${trimmed.slice(1).replace(/\D/g, '')}`;
+    }
+    const digits = trimmed.replace(/\D/g, '');
+    return digits ? `${DEFAULT_PHONE_COUNTRY_CODE}${digits}` : '';
   }
 
   /** Same Peruvian-spreadsheet-friendly parsing as ExcelImportService's

@@ -1,6 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import type Redis from 'ioredis';
 import {
+  GOOGLE_OAUTH_STATE_TTL_SECONDS,
   ONBOARDING_DRAFT_TTL_SECONDS,
   OTP_RESEND_COOLDOWN_SECONDS,
   OTP_TTL_SECONDS,
@@ -139,5 +140,32 @@ export class RedisService {
    */
   async deleteOnboardingDraft(userId: string): Promise<void> {
     await this.client.del(this.onboardingDraftKey(userId));
+  }
+
+  // --- Feature 09: Google Calendar Jerárquico -----------------------------
+
+  private googleOAuthStateKey(state: string): string {
+    return `google_oauth_state:${state}`;
+  }
+
+  /** Maps a random OAuth `state` param to the tenant that started the
+   *  connect flow — see redis.constants.ts's GOOGLE_OAUTH_STATE_TTL_SECONDS
+   *  doc comment for why this exists instead of the usual @TenantId(). */
+  async setGoogleOAuthState(
+    state: string,
+    tenantId: string,
+    ttlSeconds = GOOGLE_OAUTH_STATE_TTL_SECONDS,
+  ): Promise<void> {
+    await this.client.set(this.googleOAuthStateKey(state), tenantId, 'EX', ttlSeconds);
+  }
+
+  async getGoogleOAuthState(state: string): Promise<string | null> {
+    return this.client.get(this.googleOAuthStateKey(state));
+  }
+
+  /** Single-use: called right after a successful read so a replayed/leaked
+   *  `state` value cannot be reused to hijack the callback. */
+  async deleteGoogleOAuthState(state: string): Promise<void> {
+    await this.client.del(this.googleOAuthStateKey(state));
   }
 }

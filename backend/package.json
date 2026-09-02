@@ -9,7 +9,16 @@
     "start:dev": "nest start --watch",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
-    "prisma:studio": "prisma studio"
+    "prisma:studio": "prisma studio",
+    "test": "jest"
+  },
+  "jest": {
+    "rootDir": "src",
+    "testRegex": ".*\\.spec\\.ts$",
+    "transform": {
+      "^.+\\.(t|j)s$": "ts-jest"
+    },
+    "testEnvironment": "node"
   },
   "dependencies": {
     "@nestjs/common": "^10.4.15",
@@ -25,6 +34,7 @@
     "class-validator": "^0.14.1",
     "cookie-parser": "^1.4.7",
     "exceljs": "^4.4.0",
+    "googleapis": "^176.0.0",
     "ioredis": "^5.4.2",
     "nodemailer": "^6.9.16",
     "passport": "^0.7.0",
@@ -36,10 +46,13 @@
     "@nestjs/cli": "^10.4.9",
     "@types/cookie-parser": "^1.4.10",
     "@types/express": "^5.0.0",
+    "@types/jest": "^30.0.0",
     "@types/multer": "^2.2.0",
     "@types/nodemailer": "^6.4.17",
     "@types/passport-google-oauth20": "^2.0.16",
+    "jest": "^30.5.1",
     "prisma": "^6.2.1",
+    "ts-jest": "^29.4.12",
     "typescript": "^5.7.2"
   }
 }

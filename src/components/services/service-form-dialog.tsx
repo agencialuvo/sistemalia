@@ -1,13 +1,14 @@
 "use client";
 
-import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import { useForm, useFieldArray, Controller, type Resolver } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useTranslations } from "next-intl";
 import { toast } from "sonner";
-import { ImagePlus, Loader2, Plus, Trash2, X } from "lucide-react";
+import { FolderOpen, ImagePlus, Loader2, Plus, Search, Trash2, X } from "lucide-react";
 
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -21,6 +22,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { MinutesTimePicker } from "@/components/ui/minutes-time-picker";
 import {
   Select,
   SelectContent,
@@ -31,8 +33,18 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { MediaPickerDialog } from "@/components/media/media-picker-dialog";
 import { getApiErrorMessage } from "@/lib/api";
-import { createCategory, createService, updateService, uploadServiceImage } from "@/lib/services/api";
+import { createCategory, createService, updateService } from "@/lib/services/api";
+import { uploadMedia } from "@/lib/media/api";
+import { bulkSyncServiceMatrix } from "@/lib/staff/api";
+import type { MediaAsset, MediaKind } from "@/lib/validators/media";
+import {
+  COMMISSION_TYPE_LABELS,
+  COMMISSION_TYPES,
+  type CommissionType,
+  type StaffMember,
+} from "@/lib/validators/staff";
 import {
   COMMON_CONTRAINDICATIONS,
   EMPTY_SERVICE_FORM,
@@ -40,11 +52,11 @@ import {
   MAX_CONTRAINDICATIONS,
   MAX_CONTRAINDICATION_LENGTH,
   MAX_GALLERY_IMAGES,
+  MAX_GALLERY_VIDEO_UPLOAD_MB,
+  MAX_IMAGE_UPLOAD_MB,
   MAX_SESSIONS,
   SERVICE_PAYMENT_METHODS,
-  minutesToTimeString,
   serviceSchema,
-  timeStringToMinutes,
   toServiceForm,
   toServicePayload,
   type Service,
@@ -54,14 +66,30 @@ import {
 } from "@/lib/validators/service";
 import { cn } from "@/lib/utils";
 
-type TabKey = "identity" | "pricing" | "evaluation" | "timing" | "payment";
+export type TabKey = "identity" | "pricing" | "evaluation" | "timing" | "payment" | "staffAssigned";
 
-const TAB_ORDER: TabKey[] = ["identity", "pricing", "evaluation", "timing", "payment"];
+const TAB_ORDER: TabKey[] = [
+  "identity",
+  "pricing",
+  "evaluation",
+  "timing",
+  "payment",
+  "staffAssigned",
+];
 
 /** Sentinel Select item that switches Tab 1 into "crear categoría on-the-fly"
  *  mode (spec: "+ Crear nueva categoría"). Never a real categoryId, so it
  *  can't collide with a UUID. */
 const NEW_CATEGORY_SENTINEL = "__new_category__";
+
+/** Sentinel for Tab 6's "todas las especialidades" filter option — same
+ *  never-collides-with-a-UUID convention as NEW_CATEGORY_SENTINEL. */
+const ALL_SPECIALTIES_SENTINEL = "__all_specialties__";
+
+/** Kinds ImagePicker accepts per field (spec §2): imagen principal is
+ *  IMAGE-only, la galería de testimonios admite IMAGE + VIDEO. */
+const MAIN_IMAGE_KINDS: MediaKind[] = ["IMAGE"];
+const GALLERY_KINDS: MediaKind[] = ["IMAGE", "VIDEO"];
 
 /** Same palette CategoryManagerDialog offers — a category created inline
  *  here should look the same as one created from its own dialog. */
@@ -90,7 +118,7 @@ const TAB_FIELDS: Record<TabKey, (keyof ServiceFormInput)[]> = {
     "mainImageUrl",
     "testimonioGallery",
   ],
-  pricing: ["structureType", "singlePrice", "packages"],
+  pricing: ["structureType", "singlePrice", "packages", "baseCommissionType", "baseCommissionValue"],
   evaluation: [
     "requiresEvaluation",
     "evaluationServiceId",
@@ -100,6 +128,9 @@ const TAB_FIELDS: Record<TabKey, (keyof ServiceFormInput)[]> = {
   ],
   timing: ["durationMinutes", "bufferMinutes", "contraindications", "prePostCare"],
   payment: ["paymentMethods", "depositAmount", "depositIsPercentage"],
+  // No campos del form RHF — la asignación de personal vive en su propio
+  // Set local (ver assignedStaffIds) y se sincroniza aparte al guardar.
+  staffAssigned: [],
 };
 
 /**
@@ -122,6 +153,8 @@ const FIELD_TAB: Record<string, TabKey> = {
   structureType: "pricing",
   singlePrice: "pricing",
   packages: "pricing",
+  baseCommissionType: "pricing",
+  baseCommissionValue: "pricing",
   requiresEvaluation: "evaluation",
   evaluationServiceId: "evaluation",
   evaluationCost: "evaluation",
@@ -142,6 +175,8 @@ export function ServiceFormDialog({
   service,
   categories,
   services,
+  staff,
+  initialTab,
   onSaved,
 }: {
   open: boolean;
@@ -151,11 +186,26 @@ export function ServiceFormDialog({
   categories: ServiceCategory[];
   /** Candidates for the valoración selector. */
   services: Service[];
+  /** Professionals offered on the "Personal Asignado" tab (Engine de
+   *  Disponibilidad) — active ones only, same convention as the valoración
+   *  candidates above. */
+  staff: StaffMember[];
+  /** Which tab to land on when the dialog opens — defaults to "identity".
+   *  Lets ServiceCard's "Personal Asignado" menu item jump straight there
+   *  instead of making the user click through the whole wizard. */
+  initialTab?: TabKey;
   onSaved: () => void;
 }) {
   const t = useTranslations("Services");
   const [tab, setTab] = useState<TabKey>("identity");
   const [submitting, setSubmitting] = useState(false);
+  /** "Personal Asignado" (spec: asignación bidireccional Servicio -> Doctores)
+   *  — lives outside the RHF form because it doesn't round-trip through
+   *  toServicePayload: it's synced via its own call to bulkSyncServiceMatrix
+   *  once the service itself has an id (see onSubmit below). */
+  const [assignedStaffIds, setAssignedStaffIds] = useState<Set<string>>(new Set());
+  const [staffSearch, setStaffSearch] = useState("");
+  const [staffSpecialtyFilter, setStaffSpecialtyFilter] = useState("");
 
   const {
     register,
@@ -187,6 +237,7 @@ export function ServiceFormDialog({
   const evaluationServiceId = watch("evaluationServiceId");
   const isDeductible = watch("isEvaluationDeductible");
   const depositIsPercentage = watch("depositIsPercentage");
+  const baseCommissionType = watch("baseCommissionType");
   const mainImageUrl = watch("mainImageUrl");
   const gallery = watch("testimonioGallery") ?? [];
   const contraindications = watch("contraindications") ?? [];
@@ -195,7 +246,10 @@ export function ServiceFormDialog({
 
   useEffect(() => {
     if (!open) return;
-    setTab("identity");
+    setTab(initialTab ?? "identity");
+    setAssignedStaffIds(new Set(service?.assignedStaffIds ?? []));
+    setStaffSearch("");
+    setStaffSpecialtyFilter("");
     reset(
       service
         ? toServiceForm(service)
@@ -207,7 +261,31 @@ export function ServiceFormDialog({
             categoryId: categories.length === 1 ? categories[0].id : "",
           },
     );
-  }, [open, service, categories, reset]);
+  }, [open, service, categories, initialTab, reset]);
+
+  /** Distinct especialidades among `staff`, for Tab 6's filter dropdown —
+   *  derived rather than fetched separately since `staff` already carries
+   *  each member's especialidad. */
+  const staffSpecialtyOptions = useMemo(() => {
+    const seen = new Map<string, string>();
+    for (const member of staff) {
+      if (member.specialty) seen.set(member.specialty.id, member.specialty.name);
+    }
+    return [...seen.entries()]
+      .map(([id, name]) => ({ id, name }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [staff]);
+
+  const filteredStaff = useMemo(() => {
+    const query = staffSearch.trim().toLowerCase();
+    return staff.filter((member) => {
+      const matchesSearch =
+        !query || `${member.firstName} ${member.lastName}`.toLowerCase().includes(query);
+      const matchesSpecialty =
+        !staffSpecialtyFilter || member.specialty?.id === staffSpecialtyFilter;
+      return matchesSearch && matchesSpecialty;
+    });
+  }, [staff, staffSearch, staffSpecialtyFilter]);
 
   const onSubmit = useCallback(
     async (values: ServiceFormInput) => {
@@ -226,13 +304,19 @@ export function ServiceFormDialog({
         }
 
         const payload = toServicePayload({ ...values, categoryId });
-        if (service) {
-          await updateService(service.id, payload);
-          toast.success(t("form.updated"));
-        } else {
-          await createService(payload);
-          toast.success(t("form.created"));
-        }
+        const saved = service
+          ? await updateService(service.id, payload)
+          : await createService(payload);
+        toast.success(service ? t("form.updated") : t("form.created"));
+
+        // "Al guardar el servicio, sincroniza automáticamente los registros
+        // en StaffService" (spec) — scoped to this one service (`serviceIds:
+        // [saved.id]`) so the rest of the tenant's matrix is untouched.
+        await bulkSyncServiceMatrix(
+          [saved.id],
+          [...assignedStaffIds].map((staffMemberId) => ({ staffMemberId, serviceId: saved.id })),
+        );
+
         onOpenChange(false);
         // Refreshes both services AND categories (useServicesCatalog.refresh),
         // so a category created here shows up in the filter immediately.
@@ -243,7 +327,7 @@ export function ServiceFormDialog({
         setSubmitting(false);
       }
     },
-    [service, onOpenChange, onSaved, t],
+    [service, assignedStaffIds, onOpenChange, onSaved, t],
   );
 
   const onInvalid = useCallback(
@@ -454,6 +538,7 @@ export function ServiceFormDialog({
                     max={1}
                     onChange={(urls) => setValue("mainImageUrl", urls[0] ?? "")}
                     label={t("form.mainImageCta")}
+                    allowedKinds={MAIN_IMAGE_KINDS}
                   />
                 </div>
 
@@ -467,6 +552,7 @@ export function ServiceFormDialog({
                     max={MAX_GALLERY_IMAGES}
                     onChange={(urls) => setValue("testimonioGallery", urls)}
                     label={t("form.galleryCta")}
+                    allowedKinds={GALLERY_KINDS}
                   />
                 </div>
               </TabsContent>
@@ -638,6 +724,84 @@ export function ServiceFormDialog({
                     )}
                   </div>
                 )}
+
+                {/* Comisión Base del Servicio (nivel 2 de 3 del Esquema de
+                    Comisiones Jerárquico) — vive en este tab, no en Cobranza,
+                    porque es un dato de fijación de precios del servicio. */}
+                <div className="rounded-lg border border-border p-4">
+                  <div className="flex items-center gap-2.5">
+                    <Switch
+                      id="service-base-commission-enabled"
+                      checked={!!baseCommissionType}
+                      onCheckedChange={(enabled) => {
+                        if (enabled) {
+                          setValue("baseCommissionType", "PERCENTAGE");
+                        } else {
+                          setValue("baseCommissionType", "");
+                          setValue("baseCommissionValue", "");
+                        }
+                      }}
+                    />
+                    <Label htmlFor="service-base-commission-enabled" className="cursor-pointer">
+                      {t("form.baseCommissionEnableLabel")}
+                    </Label>
+                  </div>
+                  <p className="mt-0.5 pl-[calc(2.25rem)] text-xs text-muted-foreground">
+                    {t("form.baseCommissionHelp")}
+                  </p>
+
+                  {baseCommissionType && (
+                    <div className="mt-3 flex flex-wrap items-end gap-3 border-t border-border/70 pt-3">
+                      <div>
+                        <Label className="text-xs text-muted-foreground">
+                          {t("form.commissionTypeLabel")}
+                        </Label>
+                        <Controller
+                          control={control}
+                          name="baseCommissionType"
+                          render={({ field }) => (
+                            <Select
+                              value={field.value || "PERCENTAGE"}
+                              onValueChange={(value) =>
+                                field.onChange((value as CommissionType) || "PERCENTAGE")
+                              }
+                            >
+                              <SelectTrigger className="mt-1 w-32">
+                                <SelectValue>
+                                  {(value: string | null) =>
+                                    COMMISSION_TYPE_LABELS[(value as CommissionType) ?? "PERCENTAGE"]
+                                  }
+                                </SelectValue>
+                              </SelectTrigger>
+                              <SelectContent>
+                                {COMMISSION_TYPES.map((type) => (
+                                  <SelectItem key={type} value={type}>
+                                    {COMMISSION_TYPE_LABELS[type]}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          )}
+                        />
+                      </div>
+                      <div>
+                        <Label className="text-xs text-muted-foreground">
+                          {t("form.commissionValueLabel")}
+                        </Label>
+                        <Input
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          inputMode="decimal"
+                          {...register("baseCommissionValue")}
+                          placeholder={baseCommissionType === "PERCENTAGE" ? "10" : "0.00"}
+                          className="mt-1 w-24"
+                        />
+                      </div>
+                    </div>
+                  )}
+                  <FieldError message={errors.baseCommissionValue?.message} />
+                </div>
               </TabsContent>
 
               {/* ---------------- Tab 3: Valoración y triaje ------------------ */}
@@ -769,6 +933,7 @@ export function ServiceFormDialog({
                         </Label>
                         <Input
                           id="service-deductible-days"
+                          type="number"
                           inputMode="numeric"
                           {...register("deductibleExpirationDays")}
                           placeholder="30"
@@ -793,13 +958,10 @@ export function ServiceFormDialog({
                       control={control}
                       name="durationMinutes"
                       render={({ field }) => (
-                        <Input
+                        <MinutesTimePicker
                           id="service-duration"
-                          type="time"
-                          value={minutesToTimeString(field.value)}
-                          onChange={(event) =>
-                            field.onChange(timeStringToMinutes(event.target.value))
-                          }
+                          value={field.value}
+                          onChange={field.onChange}
                           className="mt-1.5"
                         />
                       )}
@@ -815,13 +977,10 @@ export function ServiceFormDialog({
                       control={control}
                       name="bufferMinutes"
                       render={({ field }) => (
-                        <Input
+                        <MinutesTimePicker
                           id="service-buffer"
-                          type="time"
-                          value={minutesToTimeString(field.value)}
-                          onChange={(event) =>
-                            field.onChange(timeStringToMinutes(event.target.value))
-                          }
+                          value={field.value ?? ""}
+                          onChange={field.onChange}
                           className="mt-1.5"
                         />
                       )}
@@ -980,6 +1139,113 @@ export function ServiceFormDialog({
                   )}
                 />
               </TabsContent>
+
+              {/* ---------------- Tab 6: Personal Asignado --------------------- */}
+              <TabsContent value="staffAssigned" className="mt-0 space-y-4">
+                <div>
+                  <Label>{t("form.staffAssignedLabel")}</Label>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    {t("form.staffAssignedHelp")}
+                  </p>
+                </div>
+
+                {staff.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">{t("form.noStaffAvailable")}</p>
+                ) : (
+                  <>
+                    <div className="flex flex-wrap gap-2">
+                      <div className="relative min-w-48 flex-1">
+                        <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                        <Input
+                          value={staffSearch}
+                          onChange={(event) => setStaffSearch(event.target.value)}
+                          placeholder={t("form.staffSearchPlaceholder")}
+                          className="pl-9"
+                        />
+                      </div>
+                      <Select
+                        value={staffSpecialtyFilter || ALL_SPECIALTIES_SENTINEL}
+                        onValueChange={(value) =>
+                          setStaffSpecialtyFilter(
+                            !value || value === ALL_SPECIALTIES_SENTINEL ? "" : value,
+                          )
+                        }
+                      >
+                        <SelectTrigger className="w-52">
+                          <SelectValue placeholder={t("form.staffAllSpecialties")}>
+                            {(value: string | null) =>
+                              !value || value === ALL_SPECIALTIES_SENTINEL
+                                ? t("form.staffAllSpecialties")
+                                : (staffSpecialtyOptions.find((s) => s.id === value)?.name ??
+                                  t("form.staffAllSpecialties"))
+                            }
+                          </SelectValue>
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value={ALL_SPECIALTIES_SENTINEL}>
+                            {t("form.staffAllSpecialties")}
+                          </SelectItem>
+                          {staffSpecialtyOptions.map((specialty) => (
+                            <SelectItem key={specialty.id} value={specialty.id}>
+                              {specialty.name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    {filteredStaff.length === 0 ? (
+                      <p className="text-sm text-muted-foreground">{t("form.staffNoMatch")}</p>
+                    ) : (
+                      <div className="space-y-2">
+                        {filteredStaff.map((member) => {
+                          const checked = assignedStaffIds.has(member.id);
+                          return (
+                            <label
+                              key={member.id}
+                              className={cn(
+                                "flex cursor-pointer items-center gap-2.5 rounded-lg border p-3 transition-colors",
+                                checked
+                                  ? "border-primary bg-primary/5"
+                                  : "border-border hover:bg-muted/50",
+                              )}
+                            >
+                              <Checkbox
+                                checked={checked}
+                                onCheckedChange={() =>
+                                  setAssignedStaffIds((current) => {
+                                    const next = new Set(current);
+                                    if (next.has(member.id)) next.delete(member.id);
+                                    else next.add(member.id);
+                                    return next;
+                                  })
+                                }
+                              />
+                              <Avatar size="sm">
+                                {member.avatarUrl ? (
+                                  <AvatarImage src={member.avatarUrl} alt="" />
+                                ) : null}
+                                <AvatarFallback>
+                                  {member.firstName[0]?.toUpperCase()}
+                                  {member.lastName[0]?.toUpperCase()}
+                                </AvatarFallback>
+                              </Avatar>
+                              <span className="flex-1 text-sm font-medium text-foreground">
+                                {member.firstName} {member.lastName}
+                              </span>
+                              {member.specialty && (
+                                <span className="text-xs text-muted-foreground">
+                                  {member.specialty.name}
+                                </span>
+                              )}
+                            </label>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </>
+                )}
+              </TabsContent>
             </div>
           </Tabs>
 
@@ -1014,23 +1280,44 @@ function FieldError({ message }: { message?: string }) {
   return <p className="mt-1 text-xs text-destructive">{message}</p>;
 }
 
-/** Uploads on pick and stores the returned URLs. Same contract as the
- *  onboarding logo step: a failed upload is reported while the user is still
- *  looking at the picker, instead of sinking the whole save. */
+/** "https://.../uploads/media/…/xyz.mp4" -> true. Gallery URLs are opaque
+ *  strings once stored on the form — the backend always appends the real
+ *  extension (media.service.ts's MEDIA_TYPE_RULES), so the extension is a
+ *  reliable enough signal to pick a <video> vs <Image> thumbnail without
+ *  threading MediaKind through the whole form. */
+function isVideoUrl(url: string): boolean {
+  return /\.(mp4|mov|webm)(\?.*)?$/i.test(url);
+}
+
+/**
+ * Uploads on pick (via the media library's own POST /media, so a direct
+ * upload here also lands in "Medios" for reuse elsewhere) and stores the
+ * returned URLs; a second entry point opens MediaPickerDialog to reuse an
+ * asset already in the library instead of uploading a duplicate. A failed
+ * upload is reported while the user is still looking at the picker, instead
+ * of sinking the whole save.
+ */
 function ImagePicker({
   value,
   max,
   onChange,
   label,
+  allowedKinds,
 }: {
   value: string[];
   max: number;
   onChange: (urls: string[]) => void;
   label: string;
+  /** IMAGE-only for the imagen principal, IMAGE + VIDEO for la galería de
+   *  testimonios (spec §2.A/§2.B) — drives both the file-input `accept` and
+   *  the Medios picker's filter. */
+  allowedKinds: MediaKind[];
 }) {
   const t = useTranslations("Services");
   const inputRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const allowsVideo = allowedKinds.includes("VIDEO");
 
   async function handleFiles(files: FileList | null) {
     if (!files || files.length === 0) return;
@@ -1043,8 +1330,18 @@ function ImagePicker({
     setUploading(true);
     try {
       const picked = Array.from(files).slice(0, room);
-      const urls = await Promise.all(picked.map((file) => uploadServiceImage(file)));
-      onChange([...value, ...urls].slice(0, max));
+      const uploaded: string[] = [];
+      for (const file of picked) {
+        const isVideo = file.type.startsWith("video/");
+        const maxMb = isVideo ? MAX_GALLERY_VIDEO_UPLOAD_MB : MAX_IMAGE_UPLOAD_MB;
+        if (file.size > maxMb * 1024 * 1024) {
+          toast.error(t("form.fileTooLarge", { name: file.name, max: maxMb }));
+          continue;
+        }
+        const asset = await uploadMedia(file);
+        uploaded.push(asset.url);
+      }
+      if (uploaded.length > 0) onChange([...value, ...uploaded].slice(0, max));
     } catch (error) {
       toast.error(getApiErrorMessage(error, t("form.uploadFailed")));
     } finally {
@@ -1053,12 +1350,24 @@ function ImagePicker({
     }
   }
 
+  function handleMediaPicked(asset: MediaAsset) {
+    if (value.length >= max) {
+      toast.error(t("form.galleryFull", { max }));
+      return;
+    }
+    onChange([...value, asset.url].slice(0, max));
+  }
+
   return (
     <div className="mt-2">
       <div className="flex flex-wrap gap-2">
         {value.map((url) => (
           <div key={url} className="group relative size-20 overflow-hidden rounded-lg border border-border">
-            <Image src={url} alt="" fill sizes="80px" className="object-cover" unoptimized />
+            {isVideoUrl(url) ? (
+              <video src={url} muted playsInline className="size-full object-cover" />
+            ) : (
+              <Image src={url} alt="" fill sizes="80px" className="object-cover" unoptimized />
+            )}
             <button
               type="button"
               onClick={() => onChange(value.filter((item) => item !== url))}
@@ -1069,32 +1378,55 @@ function ImagePicker({
             </button>
           </div>
         ))}
+      </div>
 
-        {value.length < max && (
-          <button
+      {value.length < max && (
+        <div className="mt-2 flex gap-2">
+          <Button
             type="button"
+            variant="outline"
+            size="sm"
+            className="flex-1"
             onClick={() => inputRef.current?.click()}
             disabled={uploading}
-            className="flex size-20 flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-border text-muted-foreground transition-colors hover:border-primary hover:text-primary"
           >
             {uploading ? (
-              <Loader2 className="size-5 animate-spin" />
+              <Loader2 className="mr-1.5 size-4 animate-spin" />
             ) : (
-              <>
-                <ImagePlus className="size-5" />
-                <span className="px-1 text-center text-[10px] leading-tight">{label}</span>
-              </>
+              <ImagePlus className="mr-1.5 size-4" />
             )}
-          </button>
-        )}
-      </div>
+            {label}
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="flex-1"
+            onClick={() => setPickerOpen(true)}
+          >
+            <FolderOpen className="mr-1.5 size-4" />
+            {t("form.chooseFromMedia")}
+          </Button>
+        </div>
+      )}
       <input
         ref={inputRef}
         type="file"
-        accept="image/png,image/jpeg,image/webp"
+        accept={
+          allowsVideo
+            ? "image/png,image/jpeg,image/webp,video/mp4,video/quicktime,video/webm"
+            : "image/png,image/jpeg,image/webp"
+        }
         multiple={max > 1}
         onChange={(event) => void handleFiles(event.target.files)}
         className="hidden"
+      />
+
+      <MediaPickerDialog
+        open={pickerOpen}
+        onOpenChange={setPickerOpen}
+        allowedKinds={allowedKinds}
+        onSelect={handleMediaPicked}
       />
     </div>
   );

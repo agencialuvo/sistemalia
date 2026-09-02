@@ -12,6 +12,7 @@ import { ImportServiceRowDto } from './dto/import-service-row.dto';
 import {
   BOOLEAN_LABELS,
   ColumnDef,
+  COMMISSION_LABELS,
   normalizeHeader,
   PAYMENT_LABELS,
   SERVICE_COLUMNS,
@@ -63,6 +64,7 @@ function labelIndex<T>(labels: Record<string, T>): Map<string, T> {
 const STRUCTURE_INDEX = labelIndex<string>(STRUCTURE_LABELS);
 const PAYMENT_INDEX = labelIndex<string>(PAYMENT_LABELS);
 const STATUS_INDEX = labelIndex<boolean>(STATUS_LABELS);
+const COMMISSION_INDEX = labelIndex<string>(COMMISSION_LABELS);
 /** Deliberately more generous than the template's dropdown: people type "SI",
  *  "S", "X", "TRUE" and "1" when filling a sheet by hand. */
 const BOOLEAN_INDEX = new Map<string, boolean>([
@@ -409,6 +411,22 @@ export class ExcelImportService {
         .filter(Boolean);
     }
 
+    // The sheet splits "Cuidados previos" / "Cuidados posteriores" into two
+    // columns for clarity, but the model (and the form) still store a single
+    // free-text `prePostCare`. Folded back together here, the same way
+    // applyPackageShape/applyPaymentMethodShape reshape their own
+    // spreadsheet-only columns below.
+    const preCare = typeof output.preCareNotes === 'string' ? output.preCareNotes.trim() : '';
+    const postCare = typeof output.postCareNotes === 'string' ? output.postCareNotes.trim() : '';
+    const careParts: string[] = [];
+    if (preCare) careParts.push(`Cuidados previos: ${preCare}`);
+    if (postCare) careParts.push(`Cuidados posteriores: ${postCare}`);
+    if (careParts.length > 0) {
+      output.prePostCare = careParts.join('\n\n');
+    }
+    delete output.preCareNotes;
+    delete output.postCareNotes;
+
     // Defaults that mirror the model's, so a sparsely filled row still lands
     // in a coherent state instead of relying on the DTO being lenient.
     output.structureType ??= ServiceStructureType.SINGLE;
@@ -462,6 +480,24 @@ export class ExcelImportService {
       report('depositAmount', 'Un servicio con anticipo debe indicar el monto a cobrar.');
     }
 
+    // Mirrors assertCommissionIsValid (commission.util.ts) — checked here,
+    // ahead of buildWritableData, so a bad row reports a normal per-row
+    // import error instead of aborting the whole transaction with a 400.
+    const hasCommissionType = candidate.baseCommissionType !== undefined;
+    const hasCommissionValue = candidate.baseCommissionValue !== undefined;
+    if (hasCommissionType !== hasCommissionValue) {
+      report(
+        hasCommissionType ? 'baseCommissionValue' : 'baseCommissionType',
+        'La comisión base necesita tanto el tipo como el valor.',
+      );
+    } else if (
+      hasCommissionType &&
+      candidate.baseCommissionType === 'PERCENTAGE' &&
+      (candidate.baseCommissionValue as number) > 100
+    ) {
+      report('baseCommissionValue', 'Una comisión porcentual no puede superar 100%.');
+    }
+
     return errors;
   }
 
@@ -470,6 +506,7 @@ export class ExcelImportService {
     if (column.key === 'structureType') return STRUCTURE_INDEX.get(key);
     if (column.key === 'paymentMethod') return PAYMENT_INDEX.get(key);
     if (column.key === 'isActive') return STATUS_INDEX.get(key);
+    if (column.key === 'baseCommissionType') return COMMISSION_INDEX.get(key);
     return undefined;
   }
 

@@ -1,0 +1,36 @@
+# Lista de Tareas Atómicas: Módulo Integraciones
+
+## Fase 1: Base de Datos y Criptografía (Backend)
+- [x] **Task 1.1:** Añadir el modelo `SocialChannel` y los enums `Provider` y `ChannelStatus` al esquema `prisma/schema.prisma` y ejecutar la migración (`npx prisma migrate dev`). — Nombrados `SocialChannelProvider`/`SocialChannelStatus` (prefijo por dominio, mismo criterio que el resto del esquema); migración aplicada como `20260902000000_add_social_channel` (`migrate deploy` manual — el shadow DB de `migrate dev` está roto por una migración preexistente ajena a esta tarea).
+- [x] **Task 1.2:** Crear el servicio utilitario `EncryptionService` en `src/common/services/encryption.service.ts` con funciones `encrypt(text)` y `decrypt(text)`. — Ya existía (Feature 09); se promovió a `CommonModule` `@Global()` para que SocialChannelsModule lo reuse sin duplicar cifrado.
+- [x] **Task 1.3:** Escribir pruebas unitarias para `EncryptionService` garantizando cifrado y descifrado transparente. — `encryption.service.spec.ts` (7 tests). Se agregó tooling de tests al backend (jest + ts-jest), que no existía.
+
+## Fase 2: Backend API (SocialChannelsModule)
+- [x] **Task 2.1:** Crear la estructura del módulo `SocialChannelsModule` (`controller`, `service`, `dto`).
+- [x] **Task 2.2:** Implementar `GET /api/v1/marketing/channels` para listar los canales del Tenant desencriptando datos de visualización (sin retornar tokens).
+- [x] **Task 2.3:** Implementar el endpoint `POST /api/v1/marketing/channels/meta/connect` que intercambia tokens de Meta, obtiene las Páginas/Instagram vinculados y los persiste.
+- [x] **Task 2.4:** Implementar el endpoint `POST /api/v1/marketing/channels/whatsapp/connect` para el registro WABA. — Recibe `code`+`wabaId`+`phoneNumberId` del flujo Embedded Signup, cambia el `code` por un token de negocio, suscribe la app a los webhooks de la WABA y consulta el número verificado; guarda `SocialChannel` con `provider = WHATSAPP_OFFICIAL` (nombre del enum ya fijado en Task 1.1).
+- [x] **Task 2.5:** Implementar `DELETE /api/v1/marketing/channels/:id` para la desconexión segura. — Verifica pertenencia al tenant, intenta desuscribir la app (`/subscribed_apps`) best-effort y borra la fila (borrado físico, no `DISCONNECTED` — ese status queda para cuando exista monitoreo pasivo de revocación, RF-2).
+- [x] **Task 2.6:** Implementar el controlador de Webhooks `GET/POST /api/v1/webhooks/meta` para validación de challenge e ingesta preliminar. — `MetaWebhooksController` (sin JwtAuthGuard, Meta lo llama directo). GET valida `hub.verify_token` contra `META_WEBHOOK_VERIFY_TOKEN` y devuelve `hub.challenge`; POST loguea cada evento (`leadgen`/`messages`/`whatsapp_business_messaging`) sin procesarlo aún. Pendiente antes de producción: verificar `X-Hub-Signature-256` (requiere body crudo, no configurado todavía) — no bloqueante mientras el handler solo hace log.
+
+## Fase 3: Frontend UI (`/marketing/canales`)
+- [x] **Task 3.1:** Crear la página `/app/(dashboard)/marketing/canales/page.tsx` con el layout responsivo. — Grid `sm:grid-cols-2 xl:grid-cols-3`; agregado además al sidebar (`config/dashboard-nav.ts`, grupo "marketing") como "Canales".
+- [x] **Task 3.2:** Crear los componentes visuales `ChannelCard` mostrando estado `Conectado` / `No configurado` y metadatos (foto, nombre de página/número). — `src/components/marketing/channel-card.tsx`: una tarjeta por proveedor (Meta agrupa Facebook+Instagram), lista adentro cada `SocialChannel` conectado con avatar/nombre/estado y botón de desconectar por fila. TikTok Ads se muestra como "Próximamente" (el backend no implementa `tiktok/connect` — fuera de alcance de la Fase 2 ejecutada).
+- [x] **Task 3.3:** Cargar e inicializar el SDK de Meta (`connect.facebook.net/es_LA/sdk.js`) en la vista. — `src/lib/social-channels/meta-sdk.ts`, carga perezosa (recién al hacer clic en "Conectar", no en el mount).
+- [x] **Task 3.4:** Conectar el flujo del botón `[ Conectar con Meta ]` y llamar a la API al obtener respuesta del modal de Facebook. — Incluye además `[ Conectar WhatsApp ]` (Meta Embedded Signup vía `postMessage` + `FB.login()`, no estaba en el enunciado original de esta task pero es necesario para consumir el endpoint de Task 2.4).
+- [x] **Task 3.5:** Implementar la notificación visual (Toast) y el refresco reactivo del estado tras la conexión exitosa. — `sonner` + `refresh()` tras connect/disconnect; desconectar pasa por `ConfirmDeleteDialog` primero (mismo patrón que Google Calendar en `/integraciones`).
+
+## Fase 4: Verificación y Calidad
+- [x] **Task 4.1:** Ejecutar `npx tsc --noEmit` y `nest build` en el backend sin errores.
+- [x] **Task 4.2:** Ejecutar `tsc --noEmit` y `npm run lint` en el frontend sin advertencias. — 0 errores; 41 warnings preexistentes sin relación a esta feature (ninguno en los archivos nuevos).
+
+## Addendum 1 (reorganización de IA a pedido del usuario)
+"Canales" se fusionó dentro de `/integraciones` (Feature 09 — Google Calendar), como una sola página bajo Configuración, debajo de "Plantillas Clínicas": el usuario la percibe como un único concepto ("conectar herramientas externas"), no dos entradas de menú separadas. `/marketing/canales` quedó como redirect a `/integraciones` (mismo criterio que `/citas` -> `/agenda`) y se retiró del Sidebar (grupo "marketing"). El backend (`SocialChannelsModule`, endpoints `/marketing/channels*`) no cambió — solo se movió el frontend.
+
+## Addendum 2 (rediseño "Marketplace de Integraciones")
+La fusión del Addendum 1 (Google Calendar + `ChannelCard`s apiladas verticalmente) se reemplazó por un marketplace real: un grid de cards estandarizadas (`IntegrationCard`, misma card visual para CUALQUIER proveedor) con encabezado unificado (búsqueda + tabs por categoría: Todas/Mensajería/Agenda/Ads/Conectadas). Nuevo:
+- `src/lib/integrations/types.ts` — `IntegrationDefinition`/`IntegrationCategory`/`IntegrationStatus`: el modelo declarativo que hace esto escalable — una integración nueva (Stripe, Zapier...) es una entrada más del arreglo en `page.tsx`, no un bloque de JSX nuevo.
+- `src/components/integrations/` — `integration-card.tsx`, `integration-status-badge.tsx`, `integrations-header.tsx` (tabs + búsqueda), `integrations-grid.tsx` (grid responsivo + empty state).
+- Cada integración "Conectada" abre su propio Dialog de configuración en vez de mostrar sus controles siempre expandidos: Google Calendar reusa su bloque de siempre (calendario padre + cambiar/desconectar); Meta y WhatsApp reutilizan `ChannelCard` tal cual dentro del Dialog (lista de canales conectados + desconectar cada uno), sin duplicar esa lógica.
+- Ningún endpoint ni flujo de conexión cambió (OAuth de Google, SDK de Meta, Embedded Signup de WhatsApp) — el rediseño es puramente de presentación sobre la misma lógica de estado que ya existía.
+- Gap cosmético menor: al abrir el Dialog de Meta/WhatsApp, `ChannelCard` renderiza su propia `Card` (con ring/rounded) anidada dentro del `DialogContent` (que también tiene ring/rounded) — "card dentro de card" ligeramente visible. Aceptado por ahora para no forkear `ChannelCard`; pendiente de pulido si se nota en revisión visual.

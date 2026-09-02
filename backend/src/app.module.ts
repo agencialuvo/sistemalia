@@ -1,12 +1,19 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { APP_INTERCEPTOR } from '@nestjs/core';
+import { CommonModule } from './common/common.module';
 import { TenantContextInterceptor } from './common/interceptors/tenant-context.interceptor';
+import { AppointmentsModule } from './modules/appointments/appointments.module';
 import { AuthModule } from './modules/auth/auth.module';
+import { GoogleCalendarModule } from './modules/google-calendar/google-calendar.module';
+import { InventoryModule } from './modules/inventory/inventory.module';
 import { MediaModule } from './modules/media/media.module';
+import { PatientsModule } from './modules/patients/patients.module';
 import { PaymentMethodsModule } from './modules/payment-methods/payment-methods.module';
 import { PrismaModule } from './modules/prisma/prisma.module';
 import { RedisModule } from './modules/redis/redis.module';
+import { SalesModule } from './modules/sales/sales.module';
+import { SocialChannelsModule } from './modules/social-channels/social-channels.module';
 import { SunatModule } from './modules/sunat/sunat.module';
 import { ServicesModule } from './modules/services/services.module';
 import { StaffModule } from './modules/staff/staff.module';
@@ -19,6 +26,7 @@ import { UploadModule } from './modules/upload/upload.module';
       isGlobal: true,
       envFilePath: '.env',
     }),
+    CommonModule,
     PrismaModule,
     RedisModule,
     AuthModule,
@@ -29,6 +37,12 @@ import { UploadModule } from './modules/upload/upload.module';
     StaffModule,
     MediaModule,
     PaymentMethodsModule,
+    PatientsModule,
+    AppointmentsModule,
+    InventoryModule,
+    SalesModule,
+    GoogleCalendarModule,
+    SocialChannelsModule,
   ],
   providers: [
     // Global so tenant isolation is opt-out, not opt-in: any route added later

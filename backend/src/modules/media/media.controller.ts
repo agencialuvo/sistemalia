@@ -25,7 +25,7 @@ const uuidParam = new ParseUUIDPipe({
   exceptionFactory: () => new BadRequestException('El identificador no es válido.'),
 });
 
-/** Biblioteca de medios (menú "Medios"): imágenes, GIF, video y PDF. */
+/** Biblioteca de medios (menú "Medios"): imágenes, video, audio y PDF. */
 @Controller('media')
 @UseGuards(JwtAuthGuard)
 export class MediaController {

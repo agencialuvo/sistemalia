@@ -137,6 +137,7 @@ export function StaffExcelImportDialog({
 
   const hasValidRows = (preview?.successCount ?? 0) > 0;
   const hasErrors = (preview?.errors.length ?? 0) > 0;
+  const hasWarnings = (preview?.warnings.length ?? 0) > 0;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -289,6 +290,44 @@ export function StaffExcelImportDialog({
                               {error.column || "—"}
                             </TableCell>
                             <TableCell className="text-xs">{error.error}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                </div>
+              )}
+
+              {hasWarnings && (
+                <div>
+                  <div className="mb-2 flex items-center gap-2">
+                    <AlertTriangle className="size-4 text-amber-500" />
+                    <p className="text-sm font-medium text-foreground">
+                      {t("import.warningTableTitle")}
+                    </p>
+                  </div>
+                  {/* Warnings never block a row — it imports either way, just
+                      without the service(s) that didn't match. */}
+                  <p className="mb-2 text-xs text-muted-foreground">{t("import.warningTableHelp")}</p>
+                  <div className="max-h-64 overflow-auto rounded-lg border border-border">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="w-16">{t("import.colRow")}</TableHead>
+                          <TableHead className="w-48">{t("import.colColumn")}</TableHead>
+                          <TableHead>{t("import.colError")}</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {preview.warnings.map((warning, index) => (
+                          <TableRow key={`${warning.row}-${warning.column}-${index}`}>
+                            <TableCell className="font-mono text-xs tabular-nums">
+                              {warning.row}
+                            </TableCell>
+                            <TableCell className="text-xs text-muted-foreground">
+                              {warning.column || "—"}
+                            </TableCell>
+                            <TableCell className="text-xs">{warning.error}</TableCell>
                           </TableRow>
                         ))}
                       </TableBody>

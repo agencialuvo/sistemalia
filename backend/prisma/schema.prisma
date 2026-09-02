@@ -34,10 +34,18 @@ model User {
   createdAt     DateTime     @default(now())
   updatedAt     DateTime     @updatedAt
 
-  refreshTokens     RefreshToken[]
-  ownedTenants      Tenant[]
-  tenantMemberships TenantUser[]
-  staffProfile      StaffMember?
+  refreshTokens         RefreshToken[]
+  ownedTenants          Tenant[]
+  tenantMemberships     TenantUser[]
+  staffProfile          StaffMember?
+  stockMovements        StockMovement[]
+  cashRegistersOpened   CashRegister[]  @relation("CashRegisterOpenedBy")
+  cashRegistersClosed   CashRegister[]  @relation("CashRegisterClosedBy")
+  invoicesCreated       Invoice[]
+  cashMovements         CashMovement[]
+  assignedProspects     Prospect[]
+  assignedConversations Conversation[]
+  sentMessages          Message[]
 
   @@index([email])
 }
@@ -89,45 +97,74 @@ enum TenantRole {
 // A Centro Estético. Root of the multi-tenant isolation boundary: every
 // business row added from here on hangs off a tenantId.
 model Tenant {
-  id                    String             @id @default(uuid())
-  ownerId               String
-  owner                 User               @relation(fields: [ownerId], references: [id], onDelete: Restrict)
-  identityType          TenantIdentityType
-  taxIdType             TaxIdType
-  taxId                 String             @db.VarChar(11)
-  legalName             String
+  id                     String             @id @default(uuid())
+  ownerId                String
+  owner                  User               @relation(fields: [ownerId], references: [id], onDelete: Restrict)
+  identityType           TenantIdentityType
+  taxIdType              TaxIdType
+  taxId                  String             @db.VarChar(11)
+  legalName              String
   // Dirección fiscal autocompletada por la consulta SUNAT (spec §2, Paso 1.4).
   // Nullable: SUNAT puede estar caído y el flujo continúa en modo manual.
-  fiscalAddress         String?
-  commercialName        String
-  specialty             SpecialtyCategory
-  logoUrl               String?
+  fiscalAddress          String?
+  commercialName         String
+  specialty              SpecialtyCategory
+  logoUrl                String?
   // Marca el fin del wizard de 3 pasos. Lo consume la "Restricción de Acceso
   // Global" (spec §1): un Tenant en borrador NO habilita el Dashboard.
-  onboardingCompletedAt DateTime?
-  createdAt             DateTime           @default(now())
-  updatedAt             DateTime           @updatedAt
+  onboardingCompletedAt  DateTime?
+  // Integración Google Calendar Jerárquico (Feature 09). Tokens guardados
+  // encriptados con EncryptionService (AES-256-GCM) — nunca en texto plano;
+  // ver spec §3.1. googleSyncEnabled es el interruptor maestro: apagado, el
+  // motor de sincronización (Fase 3) no llama a Google aunque haya tokens.
+  googleAccessToken      String?
+  googleRefreshToken     String?
+  googleCalendarParentId String?
+  googleSyncEnabled      Boolean            @default(false)
+  createdAt              DateTime           @default(now())
+  updatedAt              DateTime           @updatedAt
 
-  branches          Branch[]
-  users             TenantUser[]
-  serviceCategories ServiceCategory[]
-  services          Service[]
-  specialties       Specialty[]
-  staffMembers      StaffMember[]
-  mediaAssets       MediaAsset[]
-  paymentMethods    PaymentMethodConfig[]
+  branches                   Branch[]
+  users                      TenantUser[]
+  serviceCategories          ServiceCategory[]
+  services                   Service[]
+  specialties                Specialty[]
+  staffMembers               StaffMember[]
+  mediaAssets                MediaAsset[]
+  paymentMethods             PaymentMethodConfig[]
+  patients                   Patient[]
+  clinicalFormTemplates      ClinicalFormTemplate[]
+  clinicalTemplateCategories ClinicalTemplateCategory[]
+  appointments               Appointment[]
+  rooms                      Room[]
+  equipment                  Equipment[]
+  patientTags                PatientTag[]
+  products                   Product[]
+  productCategories          ProductCategory[]
+  inventoryBatches           InventoryBatch[]
+  stockMovements             StockMovement[]
+  cashRegisters              CashRegister[]
+  invoiceSeriesCounters      InvoiceSeriesCounter[]
+  invoices                   Invoice[]
+  payments                   Payment[]
+  cashMovements              CashMovement[]
+  socialChannels             SocialChannel[]
+  prospects                  Prospect[]
+  conversations              Conversation[]
 
   @@index([taxId])
   @@index([ownerId])
 }
 
-// Biblioteca de medios (menú "Medios"): imágenes, video, PDF y GIF que el
-// tenant sube para usarlos en el catálogo, campañas o el agente de IA.
+// Biblioteca de medios (menú "Medios"): imágenes, video, audio y PDF que el
+// tenant sube para usarlos en el catálogo, campañas o el agente de IA. Formatos
+// aceptados por tipo (media.service.ts § MEDIA_TYPE_RULES): IMAGE = WebP/JPG/PNG,
+// VIDEO = MP4, AUDIO = MP3, PDF = PDF — cualquier otro formato se rechaza.
 enum MediaKind {
   IMAGE
   VIDEO
+  AUDIO
   PDF
-  GIF
 }
 
 model MediaAsset {
@@ -280,6 +317,25 @@ model ServiceCategory {
   @@index([tenantId])
 }
 
+// Catálogo de etiquetas administrables del CRM de pacientes ("VIP",
+// "Frecuente"). Patient.tags sigue siendo String[] — este catálogo solo le da
+// nombre/color canónicos y un contador; PatientTagsService sincroniza
+// renombrados/borrados contra los arrays `tags` de todos los pacientes del
+// tenant por nombre, mismo criterio de "vínculo por nombre" que
+// ServiceCategory usa en la importación.
+model PatientTag {
+  id        String   @id @default(uuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name      String
+  color     String   @db.VarChar(7)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+}
+
 // Servicio / tratamiento. Fuente única de verdad para la IA de ventas, el
 // motor de agenda y la facturación.
 model Service {
@@ -337,14 +393,30 @@ model Service {
   // caja" y "anticipo") — de ahí el arreglo en vez de un valor único.
   paymentMethods      ServicePaymentMethod[] @default([IN_PERSON])
   // Monto fijo en soles, o porcentaje 0-100 si depositIsPercentage = true.
-  depositAmount       Decimal?                @db.Decimal(10, 2)
-  depositIsPercentage Boolean                 @default(false)
+  depositAmount       Decimal?               @db.Decimal(10, 2)
+  depositIsPercentage Boolean                @default(false)
+
+  // --- Bloque 6: Comisión base (Esquema de Comisiones Jerárquico) ---
+  // Nivel 2 de 3: aplica a cualquier profesional que ofrezca este servicio
+  // salvo que StaffService.customCommission* lo sobreescriba (nivel 1) o,
+  // en su ausencia, caiga a StaffMember.defaultCommission* (nivel 3). Ver
+  // resolveCommission (validators/staff.ts, frontend) para el orden real.
+  baseCommissionType  CommissionType?
+  baseCommissionValue Decimal?        @db.Decimal(10, 2)
 
   isActive  Boolean  @default(true) // Baja lógica (spec §3, DELETE /services/:id)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   staffAssignments StaffService[]
+  // Turnos de la agenda de un profesional restringidos a este servicio en
+  // particular (ej. "Botox solo por la mañana") — ver StaffScheduleShift.
+  scheduleShifts   StaffScheduleShift[]
+  // Fotos de galería de pacientes (Módulo 05) etiquetadas con el tratamiento
+  // que las originó — opcional, ver PatientGalleryImage.serviceId.
+  galleryImages    PatientGalleryImage[]
+  appointments     Appointment[]
+  invoiceItems     InvoiceItem[]
 
   // El listado siempre filtra por tenant y casi siempre por estado o
   // categoría; Prisma no indexa las FK automáticamente en PostgreSQL.
@@ -396,6 +468,12 @@ model Specialty {
   @@index([tenantId])
 }
 
+enum StaffDocumentType {
+  DNI
+  CE // Carné de Extranjería
+  PASSPORT
+}
+
 // Perfil del profesional/especialista de la clínica. `userId` es opcional
 // (spec §2.3): sólo se vincula a User cuando el doctor tiene acceso propio
 // al sistema, y es 1:1 — un usuario no puede ser dos perfiles de staff a
@@ -411,72 +489,1222 @@ model StaffMember {
   specialtyId String?
   specialty   Specialty? @relation(fields: [specialtyId], references: [id], onDelete: SetNull)
 
-  firstName            String
-  lastName             String
-  medicalLicense       String?
-  email                String?
-  phone                String?
-  avatarUrl            String?
-  biography            String?  @db.Text
+  firstName              String
+  lastName               String
+  documentType           StaffDocumentType?
+  documentNumber         String?
+  medicalLicense         String?
+  email                  String?
+  phone                  String?
+  avatarUrl              String?
+  biography              String?            @db.Text
   // Código HEX (#RRGGBB) para el badge del calendario, igual que ServiceCategory.color.
-  color                String?  @db.VarChar(7)
+  color                  String?            @db.VarChar(7)
   // Porcentaje 0-100.00; Decimal(5,2) alcanza sin desperdiciar precisión.
-  commissionPercentage Decimal? @db.Decimal(5, 2)
-  isActive             Boolean  @default(true) // Baja lógica (spec §3, DELETE /staff/:id)
-  createdAt            DateTime @default(now())
-  updatedAt            DateTime @updatedAt
+  // Anterior a defaultCommission*; se mantiene por compatibilidad pero el
+  // esquema jerárquico (nivel 3) usa defaultCommissionType/Value en su lugar.
+  commissionPercentage   Decimal?           @db.Decimal(5, 2)
+  // Nivel 3 de 3 (el más general): comisión que aplica a CUALQUIER servicio
+  // de este profesional salvo que Service.baseCommission* (nivel 2) o
+  // StaffService.customCommission* (nivel 1) lo sobreescriban.
+  defaultCommissionType  CommissionType?
+  defaultCommissionValue Decimal?           @db.Decimal(10, 2)
+  isActive               Boolean            @default(true) // Baja lógica (spec §3, DELETE /staff/:id)
+  // Integración Google Calendar Jerárquico (Feature 09) — calendario hijo de
+  // este profesional dentro de la cuenta Google del tenant; null hasta que
+  // el motor de sincronización (Fase 3) lo aprovisiona.
+  googleCalendarChildId  String?
+  googleEmail            String?
+  createdAt              DateTime           @default(now())
+  updatedAt              DateTime           @updatedAt
 
-  services  StaffService[]
-  schedules StaffSchedule[]
-  absences  StaffAbsence[]
+  services                 StaffService[]
+  schedules                StaffSchedule[]
+  absences                 StaffAbsence[]
+  clinicalProcedureRecords ClinicalProcedureRecord[]
+  appointments             Appointment[]
+  invoiceItems             InvoiceItem[]
 
   @@index([tenantId, isActive])
   @@index([specialtyId])
 }
 
 // Matriz de competencias: qué servicios del Módulo 03 puede ejecutar cada
-// profesional, con duración personalizada opcional.
+// profesional, con duración y buffers personalizados opcionales — un mismo
+// servicio puede necesitar más limpieza de cabina con un profesional que con
+// otro, y algunos consultorios prefieren no mostrarle ese margen al cliente.
 model StaffService {
-  id                    String      @id @default(uuid())
+  id                    String          @id @default(uuid())
   staffMemberId         String
-  staffMember           StaffMember @relation(fields: [staffMemberId], references: [id], onDelete: Cascade)
+  staffMember           StaffMember     @relation(fields: [staffMemberId], references: [id], onDelete: Cascade)
   serviceId             String
   // Cascade (spec plan §1): si el servicio se elimina del catálogo, la
   // vinculación de competencia deja de tener sentido.
-  service               Service     @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  service               Service         @relation(fields: [serviceId], references: [id], onDelete: Cascade)
   customDurationMinutes Int?
-  createdAt             DateTime    @default(now())
+  // Sobreescriben Service.bufferMinutes para este profesional en particular.
+  // Null = usa el buffer estándar del servicio (bufferMinutes, siempre
+  // "posterior" — customBufferBeforeMin es un margen nuevo que solo existe a
+  // nivel profesional, no hay equivalente en Service todavía).
+  customBufferBeforeMin Int?
+  customBufferAfterMin  Int?
+  // El buffer sigue bloqueando el slot en el motor de disponibilidad; esto
+  // solo controla si la duración mostrada al paciente lo incluye o no.
+  hideBufferFromClient  Boolean         @default(false)
+  // Nivel 1 de 3 (el más específico) del Esquema de Comisiones Jerárquico:
+  // comisión de ESTE profesional para ESTE servicio en particular. Null =
+  // no hay override aquí, y la comisión efectiva cae a Service.baseCommission*
+  // (nivel 2) y luego a StaffMember.defaultCommission* (nivel 3) — ver
+  // resolveCommission en validators/staff.ts (frontend).
+  customCommissionType  CommissionType?
+  customCommissionValue Decimal?        @db.Decimal(10, 2)
+  createdAt             DateTime        @default(now())
 
   @@unique([staffMemberId, serviceId])
   @@index([serviceId])
 }
 
-// Horario recurrente semanal. Un StaffMember puede tener varias filas por
-// día si en el futuro se necesitan turnos partidos adicionales al almuerzo;
-// hoy la UI (spec §4) sólo genera una por día.
+// Cómo se calcula un valor de comisión — compartido por los 3 niveles del
+// Esquema de Comisiones Jerárquico (StaffService.customCommission*,
+// Service.baseCommission*, StaffMember.defaultCommission*).
+enum CommissionType {
+  // El valor es un porcentaje (0-100) del precio del servicio.
+  PERCENTAGE
+  // El valor es un monto fijo en soles, independiente del precio.
+  FIXED_AMOUNT
+}
+
+// Día de la semana en que el profesional puede atender — contenedor de 1+
+// turnos (StaffScheduleShift). Reemplaza el antiguo par único
+// startTime/endTime + lunchStartTime/lunchEndTime por día: un profesional
+// puede ahora tener, por ejemplo, un turno de mañana y otro de tarde con
+// descansos propios en cada uno (motor de disponibilidad estilo JetAppointment).
 model StaffSchedule {
-  id             String      @id @default(uuid())
-  staffMemberId  String
-  staffMember    StaffMember @relation(fields: [staffMemberId], references: [id], onDelete: Cascade)
-  dayOfWeek      Int // 0 = Domingo, 1 = Lunes, ..., 6 = Sábado
-  startTime      String // Formato "HH:mm" (ej. "08:00")
-  endTime        String // Formato "HH:mm" (ej. "17:00")
-  lunchStartTime String? // Formato "HH:mm" (ej. "13:00")
-  lunchEndTime   String? // Formato "HH:mm" (ej. "14:00")
-  isActive       Boolean     @default(true)
+  id            String               @id @default(uuid())
+  staffMemberId String
+  staffMember   StaffMember          @relation(fields: [staffMemberId], references: [id], onDelete: Cascade)
+  dayOfWeek     Int // 0 = Domingo, 1 = Lunes, ..., 6 = Sábado
+  isActive      Boolean              @default(true)
+  shifts        StaffScheduleShift[]
+
+  // A lo más una fila por día y profesional: los turnos múltiples viven
+  // dentro de `shifts`, no como filas StaffSchedule repetidas.
+  @@unique([staffMemberId, dayOfWeek])
+  @@index([staffMemberId])
+}
+
+// Un turno dentro de un día (ej. "mañana", "tarde"). Múltiples turnos por día
+// permiten horarios partidos sin depender de un único hueco de almuerzo, y
+// cada uno puede tener sus propios descansos (StaffBreak).
+model StaffScheduleShift {
+  id         String        @id @default(uuid())
+  scheduleId String
+  schedule   StaffSchedule @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
+  startTime  String // Formato "HH:mm" (ej. "08:00")
+  endTime    String // Formato "HH:mm" (ej. "13:00")
+  // Restringe este turno a un único servicio (ej. "Botox solo por la
+  // mañana"). Null = el turno aplica a cualquier servicio habilitado del
+  // profesional. SetNull: si el servicio se borra, el turno se abre a todos
+  // en vez de desaparecer silenciosamente de la agenda.
+  serviceId  String?
+  service    Service?      @relation(fields: [serviceId], references: [id], onDelete: SetNull)
+  // Orden de despliegue en la UI cuando hay varios turnos el mismo día.
+  sortOrder  Int           @default(0)
+  breaks     StaffBreak[]
+
+  @@index([scheduleId])
+  @@index([serviceId])
+}
+
+// Pausa dentro de un turno (almuerzo, descanso, etc.). Reemplaza el par fijo
+// lunchStartTime/lunchEndTime que antes vivía en StaffSchedule; un turno
+// puede ahora tener cero, una o varias.
+model StaffBreak {
+  id        String             @id @default(uuid())
+  shiftId   String
+  shift     StaffScheduleShift @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+  startTime String // Formato "HH:mm" (ej. "13:00")
+  endTime   String // Formato "HH:mm" (ej. "14:00")
+  // Ej. "Almuerzo", "Descanso" — solo etiqueta visual, no altera el cálculo.
+  label     String?
+
+  @@index([shiftId])
+}
+
+// Qué tipo de excepción representa una fila de StaffAbsence — spec ampliación
+// "Engine de Disponibilidad": no toda excepción es un bloqueo.
+enum ExceptionType {
+  // Día libre / vacación puntual: bloquea la disponibilidad en ese rango.
+  CUSTOM_OFF
+  // Día laborable extraordinario: fuerza apertura en un día normalmente
+  // cerrado según StaffSchedule (ej. un sábado excepcional).
+  WORKING_DAY
+  // Ausencia recurrente (ej. "todos los lunes de este mes") — el motor de
+  // disponibilidad la expande sobre startDate..endDate en vez de tratarla
+  // como un único bloqueo continuo.
+  REPETITIVE_OFF
+}
+
+// Excepción puntual al horario habitual (vacaciones, licencias, permisos, o
+// — con WORKING_DAY — una apertura extraordinaria).
+model StaffAbsence {
+  id            String        @id @default(uuid())
+  staffMemberId String
+  staffMember   StaffMember   @relation(fields: [staffMemberId], references: [id], onDelete: Cascade)
+  type          ExceptionType @default(CUSTOM_OFF)
+  reason        String
+  // Nota administrativa/IA, distinta de `reason`: `reason` es lo que ve el
+  // equipo al vuelo en la tarjeta, `internalNote` es contexto más largo para
+  // gestión interna (ej. "coordinar con recepción el reemplazo").
+  internalNote  String?       @db.Text
+  startDate     DateTime
+  endDate       DateTime
+  createdAt     DateTime      @default(now())
 
   @@index([staffMemberId])
 }
 
-// Excepción puntual al horario habitual (vacaciones, licencias, permisos).
-model StaffAbsence {
-  id            String      @id @default(uuid())
-  staffMemberId String
-  staffMember   StaffMember @relation(fields: [staffMemberId], references: [id], onDelete: Cascade)
-  reason        String
-  startDate     DateTime
-  endDate       DateTime
-  createdAt     DateTime    @default(now())
+// ---------------------------------------------------------------------------
+// Feature 05 — Gestión de Pacientes y CRM Operativo
+// (.specify/features/05-patients/spec.md)
+// ---------------------------------------------------------------------------
 
-  @@index([staffMemberId])
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+  PREFER_NOT_TO_SAY
+}
+
+// Baja lógica (DELETE /patients/:id = INACTIVE) más un tercer estado propio
+// de un CRM de clínica: BLOCKED cubre pacientes con los que el centro decidió
+// dejar de operar (impago, conducta), distinto de "ya no viene" (INACTIVE).
+enum PatientStatus {
+  ACTIVE
+  INACTIVE
+  BLOCKED
+}
+
+enum PatientDocumentType {
+  DNI
+  CE // Carné de Extranjería
+  PASSPORT
+  OTHER
+}
+
+enum AcquisitionChannel {
+  INSTAGRAM
+  FACEBOOK
+  GOOGLE
+  REFERRAL // Recomendación
+  TIKTOK
+  OTHER
+}
+
+// Ficha 360°: entidad principal del CRM operativo. Aislamiento estricto por
+// tenantId igual que el resto del sistema; los índices en documento, teléfono
+// y correo son los tres campos por los que el buscador rápido de /pacientes
+// resuelve (spec §3, GET /patients).
+model Patient {
+  id                 String              @id @default(uuid())
+  tenantId           String
+  tenant             Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  firstName          String
+  lastName           String
+  documentType       PatientDocumentType @default(DNI)
+  documentNumber     String?
+  phone              String?
+  email              String?
+  birthDate          DateTime?
+  gender             Gender?
+  address            String?
+  district           String?
+  avatarUrl          String?
+  // Origen del contacto (spec: carga masiva §1, columna "Medio de
+  // captación") — alimenta reportes de origen de clientes en Analítica.
+  acquisitionChannel AcquisitionChannel?
+  // Etiquetas libres del CRM ("VIP", "Frecuente") — String[] y no un catálogo
+  // aparte: crecen por tenant y no ameritan una migración, mismo criterio que
+  // Service.contraindications.
+  tags               String[]
+  notes              String?             @db.Text
+  status             PatientStatus       @default(ACTIVE)
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+
+  medicalHistory   PatientMedicalHistory?
+  clinicalNotes    PatientClinicalNote[]
+  galleryImages    PatientGalleryImage[]
+  consents         PatientConsent[]
+  procedureRecords ClinicalProcedureRecord[]
+  appointments     Appointment[]
+  invoices         Invoice[]
+  // Feature 11 — un paciente puede venir de más de un prospecto (ej. un lead
+  // de Facebook y otro de TikTok que resultan ser la misma persona,
+  // convertidos por separado) — de ahí el arreglo, no un 1:1.
+  prospects        Prospect[]
+  conversations    Conversation[]
+
+  // Un mismo documento no debería repetirse dentro del mismo tenant, pero
+  // NULLs no colisionan entre sí en Postgres — un paciente sin documento
+  // registrado todavía no bloquea la creación de otro igual de incompleto.
+  @@unique([tenantId, documentNumber])
+  @@index([tenantId, status])
+  @@index([tenantId, phone])
+  @@index([tenantId, email])
+}
+
+// Escala Fitzpatrick de fototipo cutáneo (I = piel muy clara / siempre se
+// quema, VI = piel muy oscura / nunca se quema) — exigida por la NTS N° 139
+// del MINSA para procedimientos estéticos con exposición a luz/láser.
+enum FitzpatrickSkinType {
+  TYPE_I
+  TYPE_II
+  TYPE_III
+  TYPE_IV
+  TYPE_V
+  TYPE_VI
+}
+
+// Antecedentes médicos y de alergias (spec §2) — 1:1 con Patient, separado de
+// la entidad principal porque es un bloque de datos sensible que se consulta
+// y edita como unidad propia (GET/PUT /patients/:id/medical-history) en vez
+// de viajar siempre con el resto de la ficha.
+//
+// Fase 4 (Cumplimiento Normativo MINSA NTS N° 139): los campos desde
+// `fitzpatrickSkinType` hasta `smokingHabits` son las contraindicaciones y
+// factores de riesgo que la norma exige registrar antes de un procedimiento
+// estético — no aplican a toda clínica (un centro sin tratamientos de piel/
+// láser puede dejarlos vacíos), de ahí que todos sigan siendo opcionales.
+model PatientMedicalHistory {
+  id                     String               @id @default(uuid())
+  patientId              String               @unique
+  patient                Patient              @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  allergies              String[]
+  chronicConditions      String[]
+  currentMedications     String[]
+  bloodType              String?              @db.VarChar(5) // ej. "O+", "AB-"
+  emergencyContactName   String?
+  emergencyContactPhone  String?
+  fitzpatrickSkinType    FitzpatrickSkinType?
+  // Texto libre para la descripción coloquial del tipo de piel (ej. "grasa
+  // mixta") — complementa, no reemplaza, la escala Fitzpatrick de arriba.
+  skinType               String?
+  isPregnantOrLactating  Boolean              @default(false)
+  // Isotretinoína (Roaccutane/Accutane) en los últimos 12 meses — contraindica
+  // varios procedimientos estéticos por riesgo de cicatrización anómala.
+  roaccutaneLast12Months Boolean              @default(false)
+  keloidTendency         Boolean              @default(false)
+  activeHerpesBreakout   Boolean              @default(false)
+  frequentSunExposure    Boolean              @default(false)
+  smokingHabits          String?
+  createdAt              DateTime             @default(now())
+  updatedAt              DateTime             @updatedAt
+}
+
+// Evolución / nota clínica registrada por el equipo (spec §2, Tab "Notas
+// Clínicas" del plan). `isPrivate` distingue una nota interna del equipo
+// médico de una visible en el resto de la ficha 360°.
+model PatientClinicalNote {
+  id        String   @id @default(uuid())
+  patientId String
+  patient   Patient  @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  title     String
+  content   String   @db.Text
+  isPrivate Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([patientId, createdAt])
+}
+
+// Clasificación de una foto de galería — alimenta el comparador Antes/Después
+// del plan (Fase 3, Tab "Galería").
+enum PatientGalleryCategory {
+  BEFORE
+  AFTER
+  PROGRESS
+}
+
+model PatientGalleryImage {
+  id        String                 @id @default(uuid())
+  patientId String
+  patient   Patient                @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  imageUrl  String
+  category  PatientGalleryCategory
+  // Tratamiento que originó la foto — opcional, y SetNull: si el servicio se
+  // borra del catálogo, la foto sigue viva sin su etiqueta.
+  serviceId String?
+  service   Service?               @relation(fields: [serviceId], references: [id], onDelete: SetNull)
+  caption   String?
+  takenAt   DateTime               @default(now())
+  createdAt DateTime               @default(now())
+
+  @@index([patientId, category])
+  @@index([serviceId])
+}
+
+// Documento de consentimiento informado y su estado de firma.
+enum PatientConsentStatus {
+  PENDING
+  SIGNED
+  REVOKED
+}
+
+model PatientConsent {
+  id           String               @id @default(uuid())
+  patientId    String
+  patient      Patient              @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  title        String
+  documentUrl  String?
+  status       PatientConsentStatus @default(PENDING)
+  signedAt     DateTime?
+  signatureUrl String?
+  createdAt    DateTime             @default(now())
+
+  @@index([patientId])
+}
+
+// Fase 4 — Fichas Dinámicas (Form Builder): cada tenant diseña sus propias
+// fichas de atención (ej. "Ficha de Toxina Botulínica", "Ficha de Peeling")
+// sin migraciones — `fieldsSchema` guarda la estructura de campos como JSON,
+// interpretada por el Form Builder del frontend. `isActive` es baja lógica:
+// una plantilla usada en registros existentes nunca se borra físicamente,
+// solo se deja de ofrecer para procedimientos nuevos (spec Fase 4 §3).
+model ClinicalFormTemplate {
+  id           String   @id @default(uuid())
+  tenantId     String
+  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name         String
+  description  String?  @db.Text
+  fieldsSchema Json
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  records ClinicalProcedureRecord[]
+
+  @@index([tenantId, isActive])
+}
+
+// Categorías de Plantillas Clínicas, administrables por tenant (enriquecimiento
+// del Form Builder de Fase 4). No hay relación con ClinicalFormTemplate por FK:
+// `fieldsSchema.category` (JSON) guarda el NOMBRE de la categoría, el mismo
+// criterio "catálogo por nombre, no por id" que PatientTag usa para
+// Patient.tags — evita una migración de columna cada vez que el Form Builder
+// cambia de forma. `isSystem` marca las 7 categorías que el producto trae por
+// defecto (antes un enum cerrado): siguen existiendo como filas reales para
+// que el tenant pueda además crear las suyas, pero no se pueden eliminar.
+model ClinicalTemplateCategory {
+  id        String   @id @default(uuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name      String
+  color     String
+  isSystem  Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+}
+
+// Fase 4 — un procedimiento médico/estético ejecutado sobre un paciente,
+// registrado contra una ClinicalFormTemplate (spec Fase 4 §3). `templateId`
+// es SetNull, no Restrict/Cascade: el registro clínico es un documento legal
+// que debe sobrevivir aunque la plantilla que lo originó se desactive o
+// cambie más adelante — mismo criterio que PatientGalleryImage.serviceId.
+model ClinicalProcedureRecord {
+  id              String                @id @default(uuid())
+  patientId       String
+  patient         Patient               @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  templateId      String?
+  template        ClinicalFormTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  // Profesional que ejecutó el procedimiento — SetNull: si su perfil de
+  // personal se elimina, el registro clínico del paciente sigue vivo.
+  staffId         String?
+  staff           StaffMember?          @relation(fields: [staffId], references: [id], onDelete: SetNull)
+  // Cita que originó este procedimiento (Módulo 06 Fase 3, Task 3.2) — SetNull:
+  // el registro clínico es el documento MINSA permanente, sobrevive aunque la
+  // cita de origen deje de existir. Opcional: un registro puede crearse sin
+  // pasar por la agenda (walk-in, migración de datos históricos).
+  appointmentId   String?
+  appointment     Appointment?          @relation(fields: [appointmentId], references: [id], onDelete: SetNull)
+  // Respuestas del formulario dinámico, con la forma que `template.fieldsSchema`
+  // definía en el momento del registro (no necesariamente la forma actual de
+  // la plantilla, si esta cambió después).
+  formDataValues  Json
+  // Coordenadas/anotaciones del mapeo facial o corporal interactivo (puntos de
+  // aplicación de neurotoxina/rellenos) — null cuando el procedimiento no usa
+  // ese visor.
+  faceMappingData Json?
+  performedAt     DateTime              @default(now())
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+
+  @@index([patientId, performedAt])
+  @@index([templateId])
+  @@index([staffId])
+  @@index([appointmentId])
+}
+
+// ---------------------------------------------------------------------------
+// Feature 06 — Engine de Reservas y Agenda Interactiva
+// (.specify/features/06-appointments/spec.md)
+// ---------------------------------------------------------------------------
+
+// Ciclo de vida de una cita (spec §2). PENDING = reservada pero no confirmada
+// por el centro; el resto sigue el flujo operativo de un día de atención.
+enum AppointmentStatus {
+  PENDING
+  CONFIRMED
+  IN_SERVICE
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+// El cobro de una cita es un flujo aparte (Invoice/Payment, Módulo 08) — este
+// campo es solo el resumen de "¿ya se pagó?" que la agenda muestra sin tener
+// que resolver la relación Invoice. PENDING por defecto; nada en este módulo
+// lo cambia todavía (queda para cuando Sales module marque un Invoice
+// vinculado como PAID) — ver doc comment de AppointmentsService.
+enum AppointmentPaymentStatus {
+  PENDING
+  PAID
+}
+
+// Sala/Cabina de atención (Box Facial 1, Cabina Estética 2) — recurso
+// reservable igual que un StaffMember, pero mucho más simple: no tiene
+// horario propio ni ausencias, solo un nombre y si está habilitada. Su única
+// regla de negocio es no poder estar en dos citas a la vez (ver
+// AppointmentsService.assertResourceIsFree).
+model Room {
+  id        String   @id @default(uuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name      String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  appointments Appointment[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId, isActive])
+}
+
+// Equipo/Aparatología de alta demanda (Láser Diodo, Radiofrecuencia) — mismo
+// modelo de recurso reservable que Room, con su propio espacio de nombres
+// (un tenant puede tener una "Cabina 1" y un "Equipo 1" sin chocar).
+model Equipment {
+  id        String   @id @default(uuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name      String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  appointments Appointment[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId, isActive])
+}
+
+// Una reserva de tratamiento (spec §2: relaciones a Patient, Staff, Service,
+// Tenant). El motor de slots (AppointmentsService) es quien decide si un
+// `startAt` es reservable — este modelo solo persiste el resultado.
+model Appointment {
+  id            String      @id @default(uuid())
+  tenantId      String
+  tenant        Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  patientId     String
+  patient       Patient     @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  staffMemberId String
+  // Restrict, no SetNull: una cita nunca debe quedar "huérfana" de
+  // profesional — reagendar o cancelar es la vía correcta, no borrar al
+  // StaffMember que la tiene asignada.
+  staffMember   StaffMember @relation(fields: [staffMemberId], references: [id], onDelete: Restrict)
+  serviceId     String
+  service       Service     @relation(fields: [serviceId], references: [id], onDelete: Restrict)
+
+  // Sala y equipo son OPCIONALES a propósito (spec §1: no todo tratamiento
+  // usa una cabina o un aparato específico) — SetNull en vez de Restrict:
+  // desactivar/eliminar una sala no debe bloquearse por citas históricas que
+  // ya la usaron, a diferencia del profesional.
+  roomId      String?
+  room        Room?      @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  equipmentId String?
+  equipment   Equipment? @relation(fields: [equipmentId], references: [id], onDelete: SetNull)
+
+  // Ventana neta del tratamiento (sin buffer) — lo que el paciente percibe
+  // como "mi cita es de 3:00pm a 3:45pm".
+  startAt DateTime
+  endAt   DateTime
+
+  // Snapshot de Service.bufferMinutes al momento de reservar: el motor de
+  // slots bloquea [startAt, endAt + bufferMinutes) para la próxima cita del
+  // mismo profesional. Cambiar el buffer del servicio después no debe alterar
+  // retroactivamente cuánto tiempo bloqueó una cita ya pasada.
+  bufferMinutes Int @default(0)
+
+  status              AppointmentStatus        @default(PENDING)
+  paymentStatus       AppointmentPaymentStatus @default(PENDING)
+  notes               String?                  @db.Text
+  cancellationReason  String?
+  cancelledAt         DateTime?
+  // Integración Google Calendar Jerárquico (Feature 09) — ids del evento
+  // espejo en el calendario padre del tenant y en el calendario hijo del
+  // profesional asignado; ambos null hasta que el motor de sincronización
+  // (Fase 3) los crea.
+  googleParentEventId String?
+  googleChildEventId  String?
+  createdAt           DateTime                 @default(now())
+  updatedAt           DateTime                 @updatedAt
+
+  logs            AppointmentLog[]
+  // Registro(s) clínico(s) MINSA originados por esta cita (Fase 3, Task 3.2)
+  // — enlace opcional, no todas las citas terminan en un procedimiento
+  // documentado (ej. una consulta de evaluación).
+  clinicalRecords ClinicalProcedureRecord[]
+  invoices        Invoice[]
+
+  // El motor de slots y la agenda por columnas siempre filtran por
+  // profesional + rango de fechas; el listado general filtra por tenant +
+  // rango. La grilla por Sala/Equipo (GET /appointments/grid) filtra igual
+  // pero por esos recursos. Prisma no indexa las FK automáticamente en
+  // PostgreSQL.
+  @@index([tenantId, staffMemberId, startAt])
+  @@index([tenantId, roomId, startAt])
+  @@index([tenantId, equipmentId, startAt])
+  @@index([tenantId, startAt])
+  @@index([patientId])
+  @@index([serviceId])
+}
+
+// Auditoría de cambios de estado de una cita (tasks.md Fase 1, Task 1.1) —
+// AppointmentsService escribe una fila aquí en cada transición, incluyendo la
+// creación inicial (fromStatus null -> toStatus PENDING).
+model AppointmentLog {
+  id            String             @id @default(uuid())
+  appointmentId String
+  appointment   Appointment        @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+  fromStatus    AppointmentStatus?
+  toStatus      AppointmentStatus
+  note          String?
+  changedAt     DateTime           @default(now())
+
+  @@index([appointmentId, changedAt])
+}
+
+// ---------------------------------------------------------------------------
+// Feature 07 — Inventario y Control de Stock (Normativa DIGEMID)
+// (.specify/features/07-inventory/spec.md)
+// ---------------------------------------------------------------------------
+
+enum ProductType {
+  CONSUMABLE // Insumo para tratamientos (ej. toxina, ácido hialurónico).
+  RETAIL // Producto para venta directa al paciente.
+  BOTH // Se consume por lote en atenciones Y se vende directo al paciente.
+  EQUIPMENT // Accesorio/instrumental (no se consume por lote).
+}
+
+// Catálogo libre de categorías de producto ("Inyectables", "Dermocosmética",
+// "Consumibles") — mismo patrón que ServiceCategory: la carga masiva la
+// resuelve POR NOMBRE y la autocrea si no existe, así que el vínculo por
+// nombre debe seguir siendo determinista dentro de un mismo tenant.
+model ProductCategory {
+  id        String   @id @default(uuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name      String
+  createdAt DateTime @default(now())
+
+  products Product[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+}
+
+// Kardex — todo movimiento de stock queda clasificado en uno de estos tipos,
+// nunca se sobreescribe ni se borra (spec §1: "registro automático en Kardex").
+enum StockMovementType {
+  PURCHASE_INPUT // Ingreso por compra.
+  INITIAL_STOCK // Entrada inicial cargada por carga masiva de productos (Excel).
+  CLINICAL_CONSUMPTION // Salida por atención médica (Fase 3, Task 3.3).
+  RETAIL_SALE // Salida por venta en caja.
+  ADJUSTMENT_ADD // Ajuste positivo (ej. conteo físico encontró más stock).
+  ADJUSTMENT_SUB // Ajuste negativo/merma.
+  EXPIRED_DISCARD // Baja por vencimiento.
+}
+
+// Catálogo de insumos/productos. El stock real vive en InventoryBatch — este
+// modelo es la ficha del producto (spec §2), no un contador de unidades.
+model Product {
+  id            String           @id @default(uuid())
+  tenantId      String
+  tenant        Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name          String
+  // Único por tenant, no global: dos centros pueden reutilizar el mismo SKU
+  // de su propio proveedor sin chocar entre sí.
+  sku           String
+  type          ProductType
+  categoryId    String?
+  category      ProductCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  // Marca/laboratorio (ej. Allergan, Galderma) — texto libre, no un catálogo:
+  // a diferencia de la categoría, no hace falta agruparla ni autocompletarla.
+  brand         String?
+  // "ml", "UI", "unidades", "ampolla" — texto libre, no un enum: la variedad
+  // de unidades de medida en insumos estéticos es demasiado amplia para
+  // cerrarla de antemano (spec §2).
+  unitOfMeasure String
+  // Umbral que dispara la alerta de "stock bajo" en el catálogo — no bloquea
+  // el registro de consumos por debajo de él, es solo una señal visual.
+  minStock      Decimal          @default(0) @db.Decimal(10, 2)
+  costPrice     Decimal          @db.Decimal(10, 2)
+  // Solo aplica a productos RETAIL; queda nullable para CONSUMABLE/EQUIPMENT
+  // en vez de forzar un 0 que se confundiría con "gratis".
+  salePrice     Decimal?         @db.Decimal(10, 2)
+  isActive      Boolean          @default(true)
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  batches      InventoryBatch[]
+  movements    StockMovement[]
+  invoiceItems InvoiceItem[]
+
+  // El catálogo siempre filtra por tenant + tipo/estado; el SKU se valida
+  // como único dentro del tenant al crear/editar.
+  @@unique([tenantId, sku])
+  @@index([tenantId, isActive])
+  @@index([tenantId, type])
+}
+
+// Un lote físico de un producto — la unidad real de trazabilidad DIGEMID
+// (número de lote + fecha de vencimiento). currentQuantity es el saldo vivo,
+// mantenido en sincronía con StockMovement dentro de una misma transacción
+// (InventoryService nunca lo deja desactualizado respecto al Kardex).
+model InventoryBatch {
+  id              String   @id @default(uuid())
+  tenantId        String
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  productId       String
+  product         Product  @relation(fields: [productId], references: [id], onDelete: Restrict)
+  lotNumber       String
+  expirationDate  DateTime
+  initialQuantity Decimal  @db.Decimal(10, 2)
+  currentQuantity Decimal  @db.Decimal(10, 2)
+  // Se apaga (no se borra) cuando currentQuantity llega a 0 o se da de baja
+  // manualmente (EXPIRED_DISCARD) — el lote sigue vivo en el Kardex histórico.
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+
+  movements    StockMovement[]
+  invoiceItems InvoiceItem[]
+
+  // La sugerencia FEFO (spec §3.1) siempre filtra por producto + activo,
+  // ordenando por expirationDate ascendente — este índice cubre esa consulta
+  // directamente.
+  @@index([tenantId, productId, isActive, expirationDate])
+  @@index([tenantId, expirationDate])
+}
+
+// Fila de Kardex — inmutable una vez creada (spec §1: "registro automático");
+// una corrección se hace con un nuevo movimiento compensatorio, nunca editando
+// uno existente.
+model StockMovement {
+  id            String            @id @default(uuid())
+  tenantId      String
+  tenant        Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  productId     String
+  product       Product           @relation(fields: [productId], references: [id], onDelete: Restrict)
+  // Opcional: un ADJUSTMENT a nivel de producto (ej. recuento general) puede
+  // no apuntar a un lote específico. PURCHASE_INPUT y el resto de salidas sí
+  // lo llevan casi siempre.
+  batchId       String?
+  batch         InventoryBatch?   @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  type          StockMovementType
+  // Siempre positiva; el signo real (entrada/salida) lo determina `type`, no
+  // esta columna — evita el bug clásico de un ADJUSTMENT_SUB con cantidad ya
+  // negativa que luego se vuelve a restar.
+  quantity      Decimal           @db.Decimal(10, 2)
+  costUnitPrice Decimal?          @db.Decimal(10, 2)
+  // Id libre hacia el documento que originó el movimiento (ClinicalProcedureRecord,
+  // una futura Invoice de venta en caja) — sin FK: referenceId puede apuntar a
+  // tablas distintas según `type`, y el documento de origen puede eliminarse
+  // sin que el Kardex deje de ser el registro contable permanente.
+  referenceId   String?
+  notes         String?           @db.Text
+  performedById String?
+  performedBy   User?             @relation(fields: [performedById], references: [id], onDelete: SetNull)
+  createdAt     DateTime          @default(now())
+
+  // El Kardex (GET /inventory/kardex) siempre filtra por tenant + rango de
+  // fechas, opcionalmente por producto o lote.
+  @@index([tenantId, createdAt])
+  @@index([tenantId, productId, createdAt])
+  @@index([batchId])
+}
+
+// ---------------------------------------------------------------------------
+// Feature 08 — Ventas, Caja Chica y Facturación Electrónica (SUNAT)
+// (.specify/features/08-sales-billing/spec.md)
+// ---------------------------------------------------------------------------
+
+enum PaymentMethod {
+  CASH
+  YAPE
+  PLIN
+  CARD
+  TRANSFER
+}
+
+enum InvoiceType {
+  BOLETA
+  FACTURA
+  SALE_NOTE
+}
+
+enum InvoiceStatus {
+  DRAFT
+  PAID
+  ANULLED
+}
+
+enum CashRegisterStatus {
+  OPEN
+  CLOSED
+}
+
+enum CashMovementType {
+  INITIAL_BALANCE
+  INCOME_SALE
+  MANUAL_INCOME
+  EXPENSE_OUT
+  COMMISSION_PAYMENT
+}
+
+// Jornada de caja chica (spec §3.1: "no se pueden procesar cobros si no
+// existe un CashRegister OPEN"). Solo una abierta a la vez por tenant — la
+// regla se aplica en SalesService, Prisma no modela índices únicos
+// parciales/condicionales.
+model CashRegister {
+  id       String @id @default(uuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  openedById String
+  // Restrict: quien abrió una caja con movimientos no puede desaparecer del
+  // sistema sin dejar la auditoría huérfana.
+  openedBy   User    @relation("CashRegisterOpenedBy", fields: [openedById], references: [id], onDelete: Restrict)
+  closedById String?
+  closedBy   User?   @relation("CashRegisterClosedBy", fields: [closedById], references: [id], onDelete: SetNull)
+
+  initialBalance  Decimal  @db.Decimal(10, 2)
+  // Los tres quedan null mientras status = OPEN — recién se calculan al
+  // cerrar (spec §3.5).
+  finalBalance    Decimal? @db.Decimal(10, 2)
+  expectedBalance Decimal? @db.Decimal(10, 2)
+  difference      Decimal? @db.Decimal(10, 2)
+
+  status   CashRegisterStatus @default(OPEN)
+  openedAt DateTime           @default(now())
+  closedAt DateTime?
+  notes    String?            @db.Text
+
+  invoices  Invoice[]
+  payments  Payment[]
+  movements CashMovement[]
+
+  @@index([tenantId, status])
+  @@index([tenantId, openedAt])
+}
+
+// Contador atómico del correlativo por tipo+serie+tenant (spec §3.3:
+// "Numeración de Serie Inmutable"). Fila propia en vez de MAX(number)+1: un
+// UPDATE dentro de una transacción toma un row lock, así que dos ventas
+// concurrentes en la misma serie nunca pueden llevarse el mismo número —
+// MAX()+1 sí tendría esa condición de carrera.
+model InvoiceSeriesCounter {
+  id         String      @id @default(uuid())
+  tenantId   String
+  tenant     Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  type       InvoiceType
+  series     String
+  lastNumber Int         @default(0)
+
+  @@unique([tenantId, type, series])
+}
+
+// Comprobante de pago — Boleta/Factura electrónica o Nota de Venta interna.
+model Invoice {
+  id       String @id @default(uuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  patientId     String?
+  patient       Patient?     @relation(fields: [patientId], references: [id], onDelete: SetNull)
+  // Cita que se está cobrando (spec plan §1: "Cita Pendiente de Pago") — null
+  // en una venta directa de mostrador sin cita asociada.
+  appointmentId String?
+  appointment   Appointment? @relation(fields: [appointmentId], references: [id], onDelete: SetNull)
+
+  cashRegisterId String
+  // Restrict: un comprobante emitido dentro de una jornada de caja ata esa
+  // caja permanentemente — es el documento tributario, nunca queda huérfano.
+  cashRegister   CashRegister @relation(fields: [cashRegisterId], references: [id], onDelete: Restrict)
+
+  type   InvoiceType
+  series String
+  number Int
+  status InvoiceStatus @default(PAID)
+
+  // Datos del cliente para el comprobante — capturados como snapshot de texto
+  // (no un FK a Patient.documentNumber): una Factura puede llevar el RUC de
+  // una empresa que no es "el paciente" (padre/tutor, empresa que paga), y
+  // Patient no tiene ni RUC ni razón social.
+  customerDocType   String?
+  customerDocNumber String?
+  customerName      String?
+
+  // spec §3.2: subtotal = total / 1.18, igv = total - subtotal (operación
+  // gravada). Todo en Decimal(10,2), mismo criterio que el resto del sistema.
+  subtotal Decimal @db.Decimal(10, 2)
+  igv      Decimal @db.Decimal(10, 2)
+  total    Decimal @db.Decimal(10, 2)
+
+  createdById String
+  createdBy   User     @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt   DateTime @default(now())
+
+  anulledAt     DateTime?
+  anulledReason String?
+
+  items    InvoiceItem[]
+  payments Payment[]
+
+  // El correlativo es inmutable y único por tenant+tipo+serie (spec §3.3).
+  @@unique([tenantId, type, series, number])
+  @@index([tenantId, createdAt])
+  @@index([tenantId, status])
+  @@index([patientId])
+  @@index([appointmentId])
+  @@index([cashRegisterId])
+}
+
+// Línea de detalle de un comprobante — un servicio (con o sin profesional
+// para el cálculo de comisión) o un producto de inventario, nunca ambos.
+model InvoiceItem {
+  id        String  @id @default(uuid())
+  invoiceId String
+  invoice   Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  serviceId String?
+  service   Service?        @relation(fields: [serviceId], references: [id], onDelete: SetNull)
+  productId String?
+  product   Product?        @relation(fields: [productId], references: [id], onDelete: SetNull)
+  // Lote real del que se descontó stock al vender este ítem (solo cuando
+  // productId está presente) — sin esto, anular el comprobante no sabría a
+  // qué InventoryBatch devolverle la cantidad (spec §4: "Anular... con
+  // devolución de stock si incluía productos"). No está en el spec.md
+  // original, lo agregué porque sin rastrear el lote exacto la devolución de
+  // stock en la anulación no podría ser correcta para trazabilidad DIGEMID.
+  batchId   String?
+  batch     InventoryBatch? @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  // Profesional que ejecutó/vendió el ítem — dispara el cálculo de comisión
+  // (spec §3.4) contra el Esquema de Comisiones Jerárquico de Módulo 03/04.
+  staffId   String?
+  staff     StaffMember?    @relation(fields: [staffId], references: [id], onDelete: SetNull)
+
+  description      String
+  quantity         Decimal  @db.Decimal(10, 2)
+  unitPrice        Decimal  @db.Decimal(10, 2)
+  totalPrice       Decimal  @db.Decimal(10, 2)
+  // Snapshot del monto de comisión ya resuelto al momento de facturar — null
+  // cuando el ítem no lleva staffId o no hay ninguna regla de comisión
+  // configurada. Nunca se recalcula después: cambiar la comisión de un
+  // servicio no debe alterar retroactivamente una venta ya cobrada (mismo
+  // criterio que Appointment.bufferMinutes).
+  commissionAmount Decimal? @db.Decimal(10, 2)
+
+  @@index([invoiceId])
+  @@index([serviceId])
+  @@index([productId])
+  @@index([staffId])
+  @@index([batchId])
+}
+
+// Un pago contra un comprobante — varias filas por Invoice habilitan el
+// "split payment" (spec plan §1: ej. Yape + Efectivo).
+model Payment {
+  id       String @id @default(uuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  invoiceId String
+  invoice   Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  cashRegisterId String
+  cashRegister   CashRegister @relation(fields: [cashRegisterId], references: [id], onDelete: Restrict)
+
+  method          PaymentMethod
+  amount          Decimal       @db.Decimal(10, 2)
+  // N° de operación Yape/Plin, últimos 4 dígitos de tarjeta, N° de voucher —
+  // texto libre, cada medio de pago tiene su propio formato de referencia.
+  referenceNumber String?
+  createdAt       DateTime      @default(now())
+
+  @@index([tenantId, createdAt])
+  @@index([invoiceId])
+  @@index([cashRegisterId])
+}
+
+// Kardex de caja — todo movimiento de efectivo/valor dentro de una jornada
+// (apertura, venta, ingreso/egreso manual, pago de comisión) queda aquí,
+// nunca se edita ni se borra.
+model CashMovement {
+  id       String @id @default(uuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  cashRegisterId String
+  cashRegister   CashRegister @relation(fields: [cashRegisterId], references: [id], onDelete: Restrict)
+
+  type    CashMovementType
+  amount  Decimal          @db.Decimal(10, 2)
+  concept String?
+
+  performedById String?
+  performedBy   User?    @relation(fields: [performedById], references: [id], onDelete: SetNull)
+  createdAt     DateTime @default(now())
+
+  @@index([tenantId, cashRegisterId, createdAt])
+}
+
+// Feature 10 — Integraciones No-Code (Meta/TikTok). Nombrado
+// SocialChannelProvider/-Status en vez de los `Provider`/`ChannelStatus`
+// genéricos del plan original: mismo criterio de prefijo-por-dominio que el
+// resto del esquema (PatientStatus, AppointmentStatus, CashMovementType...),
+// para que no colisione en legibilidad con AuthProvider ni con enums futuros.
+enum SocialChannelProvider {
+  META_FACEBOOK
+  META_INSTAGRAM
+  TIKTOK
+  WHATSAPP_OFFICIAL
+}
+
+enum SocialChannelStatus {
+  ACTIVE
+  EXPIRED
+  DISCONNECTED
+}
+
+// Una fila por Página de Facebook / cuenta de Instagram / WABA / cuenta de
+// TikTok Ads conectada — un mismo tenant puede vincular varias del mismo
+// proveedor (ej. dos Páginas de Facebook), de ahí el unique compuesto en vez
+// de un simple [tenantId, provider].
+model SocialChannel {
+  id           String                @id @default(uuid())
+  tenantId     String
+  tenant       Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  provider     SocialChannelProvider
+  // ID de la Página / cuenta de Instagram / WABA / cuenta de TikTok Ads en la
+  // red social — no es un id propio de LIA.
+  externalId   String
+  // Nombre de la Página, @usuario de Instagram o número de WhatsApp — lo que
+  // ChannelCard muestra sin tener que desencriptar nada.
+  name         String
+  // Cifrados con EncryptionService (AES-256-GCM) — nunca en texto plano, ver
+  // spec §4 "Ningún token de acceso debe ser expuesto ni almacenado en texto
+  // plano". El serializer de SocialChannelsService nunca los incluye en la
+  // respuesta de la API.
+  accessToken  String
+  refreshToken String?
+  expiresAt    DateTime?
+  status       SocialChannelStatus   @default(ACTIVE)
+  // Foto de perfil, teléfono, permisos otorgados — datos de visualización
+  // que no son secretos, así que viajan sin cifrar a diferencia de los
+  // tokens de arriba.
+  metadata     Json?
+  createdAt    DateTime              @default(now())
+  updatedAt    DateTime              @updatedAt
+
+  prospects     Prospect[]
+  conversations Conversation[]
+
+  @@unique([tenantId, provider, externalId])
+  @@index([tenantId])
+}
+
+// ---------------------------------------------------------------------------
+// Feature 11 — Prospectos (Ingesta de Lead Ads y CRM)
+// (.specify/features/11-prospectos/spec.md)
+// ---------------------------------------------------------------------------
+
+enum ProspectStatus {
+  NUEVO
+  CONTACTADO
+  CITADO
+  NO_INTERESADO
+  CONVERTIDO
+}
+
+// Un lead capturado por un formulario instantáneo de Meta/TikTok (RF-1),
+// o registrado a mano por recepción. `channelId` es opcional porque un
+// prospecto manual no viene de ningún SocialChannel conectado.
+model Prospect {
+  id       String @id @default(uuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  channelId String?
+  // SetNull, no Cascade: desconectar el canal (Feature 10) no debe borrar el
+  // historial de leads que ya capturó — el prospecto sigue siendo válido,
+  // solo pierde la trazabilidad de por dónde volver a consultarlo en Meta.
+  channel   SocialChannel? @relation(fields: [channelId], references: [id], onDelete: SetNull)
+
+  fullName String
+  // No @unique: RF-1 exige "actualizar si coincide el teléfono dentro del
+  // mismo tenant", pero eso es una regla de negocio de ProspectsService
+  // (buscar-y-upsert), no una restricción de base de datos — un mismo
+  // teléfono podría legítimamente repetirse entre dos tenants distintos, y
+  // el índice compuesto de abajo ya cubre esa búsqueda.
+  phone    String
+  email    String?
+
+  status         ProspectStatus        @default(NUEVO)
+  // Redundante con `channel.provider` a propósito: un prospecto manual no
+  // tiene `channel`, pero igual necesita declarar su origen para los filtros
+  // "por canal" de RF-2 (spec plan §1 ya lo declara como columna propia, no
+  // derivada de la relación).
+  sourceProvider SocialChannelProvider
+
+  // Datos publicitarios de Meta Lead Ads (RF-1) — todos opcionales porque un
+  // prospecto manual no trae ninguno.
+  campaignName String?
+  adName       String?
+  // Preguntas y respuestas tal como las devuelve la Graph API de Meta
+  // (`field_data`) — Json en vez de una tabla aparte: cada formulario de
+  // Meta define sus propias preguntas libremente, mismo criterio que
+  // Service.contraindications/PaymentMethodConfig.details.
+  formAnswers  Json?
+
+  assignedUserId String?
+  assignedUser   User?   @relation(fields: [assignedUserId], references: [id], onDelete: SetNull)
+
+  // RF-3: una vez convertido, apunta al Patient creado — se conserva incluso
+  // si el prospecto en sí ya no cambia de estado, es la prueba de
+  // trazabilidad publicitaria que pide la spec.
+  patientId String?
+  patient   Patient? @relation(fields: [patientId], references: [id], onDelete: SetNull)
+
+  conversations Conversation[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([tenantId, phone])
+  @@index([tenantId, status])
+}
+
+// ---------------------------------------------------------------------------
+// Feature 12 — Inbox Unificado (Chat Omnicanal)
+// (.specify/features/12-inbox/spec.md)
+// ---------------------------------------------------------------------------
+
+enum ConversationStatus {
+  ABIERTA
+  EN_ESPERA
+  RESUELTA
+}
+
+enum MessageDirection {
+  INBOUND
+  OUTBOUND
+}
+
+// Un hilo por contacto dentro de un canal — spec RF-1: "Agrupar mensajes por
+// contacto asociándolos al canal correspondiente". `externalUserId` es el ID
+// scoped-al-canal que Meta/WhatsApp usa para identificar al remitente (PSID
+// de Messenger, IGSID de Instagram, número de WhatsApp) — no es un id propio
+// de LIA, de ahí el unique compuesto con `channelId` en vez de solo `tenantId`.
+model Conversation {
+  id       String @id @default(uuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  channelId String
+  channel   SocialChannel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  externalUserId String
+
+  // Nombre/teléfono de visualización tal como los reporta la red social —
+  // redundante con Prospect/Patient a propósito: una conversación puede
+  // existir antes de que exista un Prospect vinculado (spec RF-3: "reconocer
+  // contacto" es best-effort, no una garantía previa).
+  contactName  String?
+  contactPhone String?
+
+  status ConversationStatus @default(ABIERTA)
+
+  assignedUserId String?
+  assignedUser   User?   @relation(fields: [assignedUserId], references: [id], onDelete: SetNull)
+
+  // SetNull, no Cascade: borrar/desconvertir un Prospect o Patient no debe
+  // arrastrarse el historial de chat — mismo criterio que Prospect.channelId.
+  prospectId String?
+  prospect   Prospect? @relation(fields: [prospectId], references: [id], onDelete: SetNull)
+
+  patientId String?
+  patient   Patient? @relation(fields: [patientId], references: [id], onDelete: SetNull)
+
+  // Denormalizado para poder ordenar la lista de chats sin un JOIN+MAX contra
+  // Message en cada GET /marketing/inbox/conversations (spec RF-1, lista
+  // ordenada por actividad reciente) — se actualiza junto con cada Message
+  // nuevo en la misma transacción.
+  lastMessageAt DateTime @default(now())
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  messages Message[]
+
+  @@unique([tenantId, channelId, externalUserId])
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@index([tenantId, lastMessageAt])
+}
+
+model Message {
+  id             String       @id @default(uuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  // ID que Meta/WhatsApp asigna al mensaje — nullable porque un mensaje
+  // OUTBOUND que falló al enviarse (ver `status`) nunca llegó a tener uno.
+  externalId String?
+
+  direction MessageDirection
+  body      String           @db.Text
+
+  // URLs de imágenes/documentos — Json en vez de una tabla aparte, mismo
+  // criterio que Prospect.formAnswers: la forma exacta la define cada
+  // proveedor y no amerita su propio modelo todavía.
+  attachments Json?
+
+  // SENT/DELIVERED/READ/FAILED como String libre (no enum, spec plan §1) —
+  // son los estados de entrega que cada API de mensajería reporta por su
+  // cuenta vía webhooks de status, y no todas las reportan las mismas.
+  status String?
+
+  // Quién de LIA respondió — null en mensajes INBOUND (los manda el
+  // contacto, no un usuario del sistema).
+  sentByUserId String?
+  sentByUser   User?   @relation(fields: [sentByUserId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+
+  @@index([conversationId])
 }

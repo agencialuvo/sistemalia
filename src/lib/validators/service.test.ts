@@ -273,10 +273,13 @@ describe("toServiceForm", () => {
     paymentMethods: ["IN_PERSON"],
     depositAmount: null,
     depositIsPercentage: false,
+    baseCommissionType: null,
+    baseCommissionValue: null,
     isActive: true,
     createdAt: "2026-08-19T00:00:00.000Z",
     updatedAt: "2026-08-19T00:00:00.000Z",
     category: { id: CATEGORY_ID, name: "Corporal", color: "#10B981" },
+    assignedStaffIds: [],
   };
 
   /**

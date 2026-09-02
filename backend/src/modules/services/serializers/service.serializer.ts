@@ -1,10 +1,12 @@
 import { Prisma, Service, ServiceCategory, ServicePackage } from '@prisma/client';
 
-/** The three Decimal columns living directly on Service. Kept in one place so
- *  a new money field cannot be added to the model and forgotten here.
+/** The Decimal columns living directly on Service. Kept in one place so a new
+ *  money field cannot be added to the model and forgotten here.
  *  `ServicePackage.price` is a Decimal too, serialised separately below since
- *  it lives on the nested relation, not on Service itself. */
-const MONEY_FIELDS = ['singlePrice', 'evaluationCost', 'depositAmount'] as const;
+ *  it lives on the nested relation, not on Service itself.
+ *  `baseCommissionValue` is nivel 2 (base) of the Esquema de Comisiones
+ *  Jerárquico. */
+const MONEY_FIELDS = ['singlePrice', 'evaluationCost', 'depositAmount', 'baseCommissionValue'] as const;
 
 type MoneyField = (typeof MONEY_FIELDS)[number];
 
@@ -15,7 +17,12 @@ export type SerializedService = Omit<Service, MoneyField> & {
   singlePrice: string;
   evaluationCost: string | null;
   depositAmount: string | null;
+  baseCommissionValue: string | null;
   packages: SerializedServicePackage[];
+  /** Profesionales habilitados para este servicio (Engine de Disponibilidad,
+   *  "Personal Asignado") — solo los ids, no el objeto StaffService completo:
+   *  el checkbox list de ServiceFormDialog solo necesita saber cuáles marcar. */
+  assignedStaffIds: string[];
 };
 
 export type SerializedServiceWithCategory = SerializedService & {
@@ -44,20 +51,29 @@ function serializePackage(pkg: ServicePackage): SerializedServicePackage {
   return { ...pkg, price: pkg.price.toFixed(2) };
 }
 
-export function serializeService<T extends Service & { packages: ServicePackage[] }>(
-  service: T,
-): Omit<T, MoneyField | 'packages'> & SerializedService {
+export function serializeService<
+  T extends Service & { packages: ServicePackage[]; staffAssignments: { staffMemberId: string }[] },
+>(service: T): Omit<T, MoneyField | 'packages' | 'staffAssignments'> & SerializedService {
+  const { staffAssignments, ...rest } = service;
   return {
-    ...service,
+    ...rest,
     singlePrice: service.singlePrice.toFixed(2),
     evaluationCost: toMoney(service.evaluationCost),
     depositAmount: toMoney(service.depositAmount),
+    baseCommissionValue: toMoney(service.baseCommissionValue),
     packages: service.packages.map(serializePackage),
-  };
+    assignedStaffIds: staffAssignments.map((assignment) => assignment.staffMemberId),
+    // `rest` is `Omit<T, 'staffAssignments'>` with T generic — TS cannot
+    // structurally verify that overriding `packages` here replaces its
+    // original (Decimal-bearing) type from T, the same limitation the
+    // pre-existing serializeService had before this field was added. The
+    // shape is correct at runtime; the cast just tells TS what serializeServices
+    // and every caller already relies on.
+  } as Omit<T, MoneyField | 'packages' | 'staffAssignments'> & SerializedService;
 }
 
-export function serializeServices<T extends Service & { packages: ServicePackage[] }>(
-  services: T[],
-): Array<Omit<T, MoneyField | 'packages'> & SerializedService> {
+export function serializeServices<
+  T extends Service & { packages: ServicePackage[]; staffAssignments: { staffMemberId: string }[] },
+>(services: T[]): Array<Omit<T, MoneyField | 'packages' | 'staffAssignments'> & SerializedService> {
   return services.map(serializeService);
 }

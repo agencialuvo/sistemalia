@@ -15,14 +15,20 @@ const trim = ({ value }: { value: unknown }) => (typeof value === 'string' ? val
  *   - `specialtyId` — the sheet names the especialidad in words, and it may
  *     not exist yet at the moment the row is read (auto-created on import,
  *     like Servicios' categoría).
- *   - `userId`, `avatarUrl`, `biography`, `email`, `phone` — nothing a bulk
- *     load of "quién es esta persona" needs; set afterwards from the form.
+ *   - `userId`, `biography`, `email` — nothing a bulk load of "quién es esta
+ *     persona" needs; set afterwards from the form. `avatarUrl` stays (see
+ *     below) — a plain link is exactly what a spreadsheet cell can hold.
+ *     `phone` and `googleEmail` also stay: the sheet's "Teléfono / WhatsApp"
+ *     and "Correo de Google / Email" columns feed them directly.
  *   - `serviceIds`, `schedules` — the matriz de competencias and the horario
  *     semanal have no sensible flat-column representation. `serviceIds` is
  *     replaced by `serviceNames`, a comma list resolved against services that
  *     must ALREADY exist (unlike especialidad, the bulk path does not create
- *     services on the fly); `schedules` has no sheet equivalent at all —
- *     every imported professional starts with no horario configured.
+ *     services on the fly) — or the keyword `TODOS`, which
+ *     StaffExcelImportService flags instead of resolving, since "every active
+ *     service" can change between the preview and the confirm click.
+ *     `schedules` has no sheet equivalent at all — every imported
+ *     professional starts with no horario configured.
  *
  * Everything else is validated by exactly the same decorators as a row
  * created through the form.
@@ -30,10 +36,8 @@ const trim = ({ value }: { value: unknown }) => (typeof value === 'string' ? val
 export class ImportStaffRowDto extends OmitType(CreateStaffDto, [
   'userId',
   'specialtyId',
-  'avatarUrl',
   'biography',
   'email',
-  'phone',
   'serviceIds',
   'schedules',
 ] as const) {

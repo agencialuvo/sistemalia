@@ -184,17 +184,23 @@ export function Sidebar({ open = false, onClose }: SidebarProps) {
             menú, con un ícono que cambia según el estado). */}
         <div
           className={cn(
-            "flex h-14 shrink-0 items-center justify-between gap-2 border-b border-border px-4",
+            "flex h-16 shrink-0 items-center justify-between gap-2 border-b border-border px-4",
             collapsed && "lg:px-2",
           )}
         >
-          <Link href="/panel" className="flex items-center gap-2 overflow-hidden">
+          <Link href="/panel" className="flex flex-1 items-center justify-center gap-2 overflow-hidden">
             {/* Mismo ícono que el favicon (src/app/icon.svg), no un icono
                 genérico dentro de una caja de color. Plain <img>, not
                 next/image: Next blocks SVG optimization by default and this
                 file is served straight from the app-router icon route. */}
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src="/icon.svg" alt={t("title")} width={32} height={32} className="h-8 w-8 shrink-0" />
+            <img
+              src="/icon.svg"
+              alt={t("title")}
+              width={48}
+              height={48}
+              className="h-[calc(var(--spacing)*12)] w-[calc(var(--spacing)*12)] shrink-0"
+            />
             <span
               className={cn(
                 "text-sm font-semibold text-foreground",

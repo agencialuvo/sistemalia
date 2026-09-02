@@ -7,6 +7,7 @@ import { CopyCheck, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { TimeOfDayPicker } from "@/components/ui/minutes-time-picker";
 import {
   Select,
   SelectContent,
@@ -422,18 +423,17 @@ function TimeField({
   optional?: boolean;
 }) {
   return (
-    <label className="flex flex-col gap-0.5">
+    <div className="flex flex-col gap-0.5">
       <span className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</span>
-      <Input
-        type="time"
+      <TimeOfDayPicker
         className="h-8 w-28"
         value={value}
         // An empty break bound is meaningful ("no break"), so it is kept as ""
         // and only converted to undefined when the payload is built.
-        onChange={(e) => onChange(e.target.value)}
-        aria-label={optional ? `${label} (opcional)` : label}
+        onChange={onChange}
+        ariaLabel={optional ? `${label} (opcional)` : label}
       />
-    </label>
+    </div>
   );
 }
 

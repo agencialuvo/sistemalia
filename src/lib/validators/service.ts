@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { COMMISSION_TYPES, type CommissionType } from "./staff";
+
 /**
  * Mirrors backend/src/modules/services/dto/*.dto.ts (Módulo 03).
  *
@@ -25,9 +27,17 @@ export const MAX_DURATION_MINUTES = 720;
 export const MAX_BUFFER_MINUTES = 240;
 export const MAX_PRICE = 999_999.99;
 export const MAX_SESSIONS = 100;
-export const MAX_GALLERY_IMAGES = 20;
+export const MAX_GALLERY_IMAGES = 10;
 export const MAX_CONTRAINDICATIONS = 30;
 export const MAX_CONTRAINDICATION_LENGTH = 60;
+
+/** Client-side upload ceilings for ImagePicker (Tab Identificación/Galería) —
+ *  intentionally tighter than the media library's own backend limits
+ *  (15MB image / 200MB video, media.service.ts): a service's imagen
+ *  principal or testimonio doesn't need studio-quality masters, and a
+ *  smaller cap keeps the catalogue's page weight sane. */
+export const MAX_IMAGE_UPLOAD_MB = 5;
+export const MAX_GALLERY_VIDEO_UPLOAD_MB = 50;
 
 /** Offered as chips in Tab 4. Free text is still allowed — this is a shortcut,
  *  not a closed list, because the clinical vocabulary varies per centre. */
@@ -125,12 +135,24 @@ export interface Service {
   paymentMethods: ServicePaymentMethod[];
   depositAmount: string | null;
   depositIsPercentage: boolean;
+  /** Nivel 2 (base) del Esquema de Comisiones Jerárquico — comisión que
+   *  aplica a cualquier profesional que ofrezca este servicio, salvo un
+   *  override más específico (StaffService.customCommission*) o, en su
+   *  ausencia, la caída a StaffMember.defaultCommission* (ver
+   *  resolveCommission). Null = sin comisión base configurada. */
+  baseCommissionType: CommissionType | null;
+  baseCommissionValue: string | null;
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
   category: CategorySummary;
   /** Only included by GET /services/:id. */
   evaluationService?: { id: string; name: string } | null;
+  /** Profesionales habilitados para este servicio (Engine de Disponibilidad,
+   *  Tab "Personal Asignado") — solo ids, sincronizados vía el endpoint de
+   *  matriz masiva (lib/staff/api.ts's bulkSyncServiceMatrix), no vía este
+   *  payload de servicio. */
+  assignedStaffIds: string[];
 }
 
 export interface ImportError {
@@ -246,27 +268,6 @@ export function sanitizeIntInput(raw: string): string {
   return raw.replace(/[^\d]/g, "");
 }
 
-/**
- * Minutes (as the form/API store duration and buffer) <-> "HH:MM" (what an
- * `<input type="time">` speaks). Duración/limpieza tab uses a time picker
- * instead of a bare number field, but the stored unit stays minutes — nothing
- * downstream (agenda, DTOs, tests) needs to change.
- */
-export function minutesToTimeString(minutes: string | number | undefined): string {
-  const total = Math.max(0, Math.floor(Number(minutes) || 0));
-  const hh = Math.floor(total / 60)
-    .toString()
-    .padStart(2, "0");
-  const mm = (total % 60).toString().padStart(2, "0");
-  return `${hh}:${mm}`;
-}
-
-export function timeStringToMinutes(time: string): string {
-  const [hh = "0", mm = "0"] = time.split(":");
-  const total = (Number(hh) || 0) * 60 + (Number(mm) || 0);
-  return String(total);
-}
-
 const intField = (label: string, min: number, max: number) =>
   z
     .string()
@@ -372,6 +373,11 @@ export const serviceSchema = z
     depositAmount: optionalMoneyField("El anticipo"),
     depositIsPercentage: z.boolean(),
 
+    /** Nivel 2 (base) del Esquema de Comisiones Jerárquico — "Comisión Base
+     *  del Servicio". Ambos vacíos = sin comisión base configurada. */
+    baseCommissionType: z.enum(COMMISSION_TYPES).optional().or(z.literal("")),
+    baseCommissionValue: optionalMoneyField("La comisión base"),
+
     isActive: z.boolean(),
   })
   .superRefine((data, ctx) => {
@@ -425,6 +431,31 @@ export const serviceSchema = z
         }
       }
     }
+
+    if (data.baseCommissionType && isBlank(data.baseCommissionValue)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["baseCommissionValue"],
+        message: "Indica el valor de la comisión base.",
+      });
+    }
+    if (!data.baseCommissionType && !isBlank(data.baseCommissionValue)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["baseCommissionType"],
+        message: "Selecciona el tipo de comisión.",
+      });
+    }
+    if (data.baseCommissionType === "PERCENTAGE" && !isBlank(data.baseCommissionValue)) {
+      const percentage = Number(String(data.baseCommissionValue).replace(",", "."));
+      if (percentage > 100) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["baseCommissionValue"],
+          message: "Una comisión porcentual no puede superar 100%.",
+        });
+      }
+    }
   });
 
 export type ServiceFormInput = z.infer<typeof serviceSchema>;
@@ -455,6 +486,8 @@ export const EMPTY_SERVICE_FORM: ServiceFormInput = {
   paymentMethods: ["IN_PERSON"],
   depositAmount: "",
   depositIsPercentage: false,
+  baseCommissionType: "",
+  baseCommissionValue: "",
   isActive: true,
 };
 
@@ -489,6 +522,8 @@ export function toServiceForm(service: Service): ServiceFormInput {
     paymentMethods: service.paymentMethods.length > 0 ? service.paymentMethods : ["IN_PERSON"],
     depositAmount: service.depositAmount ?? "",
     depositIsPercentage: service.depositIsPercentage,
+    baseCommissionType: service.baseCommissionType ?? "",
+    baseCommissionValue: service.baseCommissionValue ?? "",
     isActive: service.isActive,
   };
 }
@@ -553,6 +588,9 @@ export function toServicePayload(form: ServiceFormInput): Record<string, unknown
     paymentMethods: form.paymentMethods,
     depositAmount: isDeposit ? toNumber(form.depositAmount) : undefined,
     depositIsPercentage: isDeposit ? form.depositIsPercentage : false,
+
+    baseCommissionType: form.baseCommissionType || undefined,
+    baseCommissionValue: toNumber(form.baseCommissionValue),
 
     isActive: form.isActive,
   };

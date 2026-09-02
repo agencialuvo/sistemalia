@@ -21,11 +21,15 @@ interface MediaTypeRule {
 const MB = 1024 * 1024;
 const MAX_IMAGE_BYTES = 15 * MB;
 const MAX_VIDEO_BYTES = 200 * MB;
+const MAX_AUDIO_BYTES = 50 * MB;
 const MAX_PDF_BYTES = 25 * MB;
 
 const startsWith = (buffer: Buffer, bytes: number[]) =>
   bytes.every((byte, index) => buffer[index] === byte);
 
+/** Formatos permitidos (único lugar donde se decide qué se acepta):
+ *  IMÁGENES = WebP/JPG/PNG, VIDEO = MP4, AUDIO = MP3, DOCUMENTOS = PDF.
+ *  Cualquier otro mimetype (GIF, MOV, WEBM, etc.) se rechaza. */
 const MEDIA_TYPE_RULES: Record<string, MediaTypeRule> = {
   'image/png': {
     kind: MediaKind.IMAGE,
@@ -45,12 +49,6 @@ const MEDIA_TYPE_RULES: Record<string, MediaTypeRule> = {
     maxSizeBytes: MAX_IMAGE_BYTES,
     matches: (b) => b.subarray(0, 4).toString('ascii') === 'RIFF' && b.subarray(8, 12).toString('ascii') === 'WEBP',
   },
-  'image/gif': {
-    kind: MediaKind.GIF,
-    extension: '.gif',
-    maxSizeBytes: MAX_IMAGE_BYTES,
-    matches: (b) => ['GIF87a', 'GIF89a'].includes(b.subarray(0, 6).toString('ascii')),
-  },
   'application/pdf': {
     kind: MediaKind.PDF,
     extension: '.pdf',
@@ -64,17 +62,14 @@ const MEDIA_TYPE_RULES: Record<string, MediaTypeRule> = {
     // ISO base media container: bytes 4-7 spell "ftyp" regardless of brand.
     matches: (b) => b.subarray(4, 8).toString('ascii') === 'ftyp',
   },
-  'video/quicktime': {
-    kind: MediaKind.VIDEO,
-    extension: '.mov',
-    maxSizeBytes: MAX_VIDEO_BYTES,
-    matches: (b) => b.subarray(4, 8).toString('ascii') === 'ftyp',
-  },
-  'video/webm': {
-    kind: MediaKind.VIDEO,
-    extension: '.webm',
-    maxSizeBytes: MAX_VIDEO_BYTES,
-    matches: (b) => startsWith(b, [0x1a, 0x45, 0xdf, 0xa3]),
+  'audio/mpeg': {
+    kind: MediaKind.AUDIO,
+    extension: '.mp3',
+    maxSizeBytes: MAX_AUDIO_BYTES,
+    // Con tag ID3 (la mayoría de archivos "reales") o, si no lo trae, el
+    // frame sync de MPEG audio (11 bits en 1: 0xFF seguido de 0xEx-0xFx).
+    matches: (b) =>
+      b.subarray(0, 3).toString('ascii') === 'ID3' || (b[0] === 0xff && (b[1] & 0xe0) === 0xe0),
   },
 };
 
@@ -116,7 +111,7 @@ export class MediaService {
     const rule = MEDIA_TYPE_RULES[file.mimetype];
     if (!rule) {
       throw new BadRequestException(
-        'Formato no permitido. Usa una imagen (JPG, PNG, WEBP, GIF), un video (MP4, MOV, WEBM) o un PDF.',
+        'Formato no permitido. Usa una imagen (JPG, PNG, WEBP), un video (MP4), un audio (MP3) o un PDF.',
       );
     }
     if (file.size > rule.maxSizeBytes) {
